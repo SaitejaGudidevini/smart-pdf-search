@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart PDF Search</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e4e4e7;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        .header {
+            background: #1a1b23;
+            border-bottom: 1px solid #2a2b35;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .header .pdf-name {
+            font-size: 13px;
+            color: #71717a;
+            margin-left: auto;
+        }
+
+        /* Search Bar */
+        .search-bar {
+            background: #1a1b23;
+            padding: 16px 24px;
+            border-bottom: 1px solid #2a2b35;
+            display: flex;
+            gap: 12px;
+            flex-shrink: 0;
+        }
+
+        .search-bar input {
+            flex: 1;
+            background: #0f1117;
+            border: 1px solid #3a3b45;
+            border-radius: 8px;
+            padding: 10px 16px;
+            color: #fff;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-bar input:focus {
+            border-color: #6366f1;
+        }
+
+        .search-bar input::placeholder {
+            color: #52525b;
+        }
+
+        .search-bar button {
+            background: #6366f1;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 24px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .search-bar button:hover { background: #5558e6; }
+        .search-bar button:disabled { background: #3a3b45; cursor: not-allowed; }
+
+        .upload-btn {
+            background: #27272a !important;
+            border: 1px solid #3a3b45 !important;
+        }
+
+        .upload-btn:hover { background: #3a3b45 !important; }
+
+        /* Main Layout */
+        .main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Document Viewer */
+        .viewer {
+            flex: 1;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 24px;
+            background: #0f1117;
+        }
+
+        .viewer img {
+            max-width: 100%;
+            border-radius: 4px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+        }
+
+        .page-nav {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 16px;
+            flex-shrink: 0;
+        }
+
+        .page-nav button {
+            background: #27272a;
+            color: #e4e4e7;
+            border: 1px solid #3a3b45;
+            border-radius: 6px;
+            padding: 6px 16px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        .page-nav button:hover { background: #3a3b45; }
+        .page-nav button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .page-nav span { font-size: 13px; color: #a1a1aa; }
+
+        /* Empty State */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #52525b;
+        }
+
+        .empty-state .icon { font-size: 48px; margin-bottom: 16px; }
+        .empty-state p { font-size: 15px; }
+
+        /* Floating Panel */
+        .floating-panel {
+            width: 380px;
+            background: #1a1b23;
+            border-left: 1px solid #2a2b35;
+            overflow-y: auto;
+            flex-shrink: 0;
+            display: none;
+        }
+
+        .floating-panel.visible { display: block; }
+
+        .panel-header {
+            padding: 16px;
+            border-bottom: 1px solid #2a2b35;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            background: #1a1b23;
+            z-index: 10;
+        }
+
+        .panel-header h3 {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .panel-header .result-count {
+            font-size: 12px;
+            color: #71717a;
+        }
+
+        .panel-close {
+            background: none;
+            border: none;
+            color: #71717a;
+            cursor: pointer;
+            font-size: 18px;
+        }
+
+        /* Source Cards */
+        .source-card {
+            padding: 14px 16px;
+            border-bottom: 1px solid #2a2b35;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .source-card:hover { background: #22232d; }
+        .source-card.active { background: #1e1f2e; border-left: 3px solid #6366f1; }
+
+        .source-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .source-location {
+            font-size: 12px;
+            font-weight: 600;
+            color: #6366f1;
+        }
+
+        .source-score {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 99px;
+            font-weight: 500;
+        }
+
+        .score-high { background: #16a34a20; color: #4ade80; }
+        .score-mid { background: #eab30820; color: #facc15; }
+        .score-low { background: #71717a20; color: #a1a1aa; }
+
+        .source-text {
+            font-size: 13px;
+            line-height: 1.5;
+            color: #d4d4d8;
+            margin-bottom: 6px;
+        }
+
+        .source-text mark {
+            background: #854d0e40;
+            color: #fbbf24;
+            padding: 1px 2px;
+            border-radius: 2px;
+        }
+
+        .source-context {
+            font-size: 11px;
+            color: #71717a;
+            line-height: 1.4;
+            font-style: italic;
+        }
+
+        .jump-btn {
+            display: inline-block;
+            margin-top: 6px;
+            font-size: 11px;
+            color: #6366f1;
+            text-decoration: none;
+            cursor: pointer;
+        }
+
+        .jump-btn:hover { text-decoration: underline; }
+
+        /* AI Summary */
+        .ai-summary {
+            margin: 12px 16px;
+            padding: 12px;
+            background: #1e1f2e;
+            border: 1px solid #2a2b45;
+            border-radius: 8px;
+        }
+
+        .ai-summary-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #71717a;
+            cursor: pointer;
+            margin-bottom: 8px;
+        }
+
+        .ai-summary-header .badge {
+            background: #6366f120;
+            color: #818cf8;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .ai-summary-text {
+            font-size: 13px;
+            line-height: 1.6;
+            color: #d4d4d8;
+        }
+
+        .ai-disclaimer {
+            font-size: 10px;
+            color: #52525b;
+            margin-top: 8px;
+            font-style: italic;
+        }
+
+        /* Key Facts */
+        .key-facts {
+            padding: 12px 16px;
+            border-bottom: 1px solid #2a2b35;
+        }
+
+        .key-facts h4 {
+            font-size: 12px;
+            color: #71717a;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .fact-item {
+            display: flex;
+            gap: 8px;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+
+        .fact-label {
+            color: #a1a1aa;
+            min-width: 80px;
+        }
+
+        .fact-value {
+            color: #e4e4e7;
+            font-weight: 500;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: #71717a;
+        }
+
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #3a3b45;
+            border-top-color: #6366f1;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Source navigation */
+        .source-nav {
+            display: flex;
+            gap: 8px;
+            padding: 12px 16px;
+            border-top: 1px solid #2a2b35;
+            position: sticky;
+            bottom: 0;
+            background: #1a1b23;
+        }
+
+        .source-nav button {
+            flex: 1;
+            background: #27272a;
+            color: #e4e4e7;
+            border: 1px solid #3a3b45;
+            border-radius: 6px;
+            padding: 8px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .source-nav button:hover { background: #3a3b45; }
+
+        /* Toast */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #27272a;
+            border: 1px solid #3a3b45;
+            color: #e4e4e7;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 13px;
+            display: none;
+            z-index: 100;
+        }
+
+        .toast.show { display: block; }
+
+        /* hidden file input */
+        #file-input { display: none; }
+    </style>
+</head>
+<body>
+
+<div class="header">
+    <h1>Smart PDF Search</h1>
+    <span class="pdf-name" id="pdf-name">No PDF loaded</span>
+</div>
+
+<div class="search-bar">
+    <input type="text" id="search-input" placeholder="Ask a question about your PDF..."
+           disabled autocomplete="off">
+    <button id="search-btn" onclick="doSearch()" disabled>Search</button>
+    <button class="upload-btn" onclick="document.getElementById('file-input').click()">Upload PDF</button>
+    <input type="file" id="file-input" accept=".pdf" onchange="uploadPDF(this)">
+</div>
+
+<div class="main">
+    <!-- Document Viewer -->
+    <div class="viewer" id="viewer">
+        <div class="empty-state" id="empty-state">
+            <div class="icon">&#128196;</div>
+            <p>Upload a PDF to get started</p>
+        </div>
+        <img id="page-image" style="display:none" alt="PDF Page">
+        <div class="page-nav" id="page-nav" style="display:none">
+            <button onclick="changePage(-1)" id="prev-btn">&larr; Prev</button>
+            <span id="page-info">Page 1 of 1</span>
+            <button onclick="changePage(1)" id="next-btn">Next &rarr;</button>
+        </div>
+    </div>
+
+    <!-- Floating Results Panel -->
+    <div class="floating-panel" id="floating-panel">
+        <div class="panel-header">
+            <div>
+                <h3>Search Results</h3>
+                <span class="result-count" id="result-count"></span>
+            </div>
+            <button class="panel-close" onclick="closePanel()">&times;</button>
+        </div>
+        <div id="panel-content"></div>
+        <div class="source-nav" id="source-nav" style="display:none">
+            <button onclick="navigateSource(-1)">&larr; Prev Source</button>
+            <button onclick="navigateSource(1)">Next Source &rarr;</button>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+    let state = {
+        pdfName: null,
+        pageCount: 0,
+        currentPage: 1,
+        searchResults: null,
+        currentSourceIdx: 0,
+    };
+
+    // --- Upload ---
+    async function uploadPDF(input) {
+        const file = input.files[0];
+        if (!file) return;
+
+        showToast('Processing PDF...');
+        const form = new FormData();
+        form.append('file', file);
+
+        try {
+            const res = await fetch('/api/upload', { method: 'POST', body: form });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Upload failed');
+
+            state.pdfName = data.filename;
+            state.pageCount = data.page_count;
+            state.currentPage = 1;
+
+            document.getElementById('pdf-name').textContent =
+                `${data.filename} (${data.page_count} pages, ${data.total_lines} lines indexed)`;
+            document.getElementById('search-input').disabled = false;
+            document.getElementById('search-btn').disabled = false;
+
+            showToast(`Indexed ${data.page_count} pages, ${data.total_lines} lines`);
+            showPage(1);
+        } catch (e) {
+            showToast('Error: ' + e.message);
+        }
+        input.value = '';
+    }
+
+    // --- Page Viewer ---
+    function showPage(pageNum, highlightTexts = null) {
+        state.currentPage = pageNum;
+
+        const img = document.getElementById('page-image');
+        const nav = document.getElementById('page-nav');
+        document.getElementById('empty-state').style.display = 'none';
+        img.style.display = 'block';
+        nav.style.display = 'flex';
+
+        if (highlightTexts && highlightTexts.length > 0) {
+            // POST to get highlighted image
+            fetch(`/api/page/${pageNum}/highlighted`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ texts: highlightTexts })
+            }).then(r => r.blob()).then(blob => {
+                img.src = URL.createObjectURL(blob);
+            });
+        } else {
+            img.src = `/api/page/${pageNum}?t=${Date.now()}`;
+        }
+
+        document.getElementById('page-info').textContent =
+            `Page ${pageNum} of ${state.pageCount}`;
+        document.getElementById('prev-btn').disabled = pageNum <= 1;
+        document.getElementById('next-btn').disabled = pageNum >= state.pageCount;
+    }
+
+    function changePage(delta) {
+        const newPage = state.currentPage + delta;
+        if (newPage >= 1 && newPage <= state.pageCount) {
+            showPage(newPage);
+        }
+    }
+
+    // --- Search ---
+    async function doSearch() {
+        const query = document.getElementById('search-input').value.trim();
+        if (!query) return;
+
+        document.getElementById('search-btn').disabled = true;
+        document.getElementById('search-btn').textContent = 'Searching...';
+
+        try {
+            const res = await fetch('/api/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.detail || 'Search failed');
+
+            state.searchResults = data;
+            state.currentSourceIdx = 0;
+
+            renderResults(data);
+            if (data.results.length > 0) {
+                jumpToSource(0);
+            }
+        } catch (e) {
+            showToast('Search error: ' + e.message);
+        }
+
+        document.getElementById('search-btn').disabled = false;
+        document.getElementById('search-btn').textContent = 'Search';
+    }
+
+    // Enter key
+    document.getElementById('search-input').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') doSearch();
+    });
+
+    // --- Render Results Panel ---
+    function renderResults(data) {
+        const panel = document.getElementById('floating-panel');
+        const content = document.getElementById('panel-content');
+
+        panel.classList.add('visible');
+        document.getElementById('result-count').textContent =
+            `${data.total_results} source${data.total_results !== 1 ? 's' : ''} found`;
+
+        let html = '';
+
+        // Show extracted topic if different from query
+        if (data.topic && data.topic !== data.query.toLowerCase()) {
+            html += `
+                <div style="padding:8px 16px;font-size:11px;color:#71717a;border-bottom:1px solid #2a2b35;">
+                    Searching for: <strong style="color:#818cf8">${escapeHtml(data.topic)}</strong>
+                </div>
+            `;
+        }
+
+        // AI Answer (prominent, expanded by default)
+        if (data.ai_summary && data.ai_summary.enabled) {
+            html += `
+                <div class="ai-summary" style="border-color:#6366f140">
+                    <div class="ai-summary-header">
+                        <span class="badge">AI Answer</span>
+                        <span style="font-size:10px;color:#52525b">${escapeHtml(data.ai_summary.model || '')}</span>
+                    </div>
+                    <div class="ai-summary-text">${formatAiAnswer(data.ai_summary.text)}</div>
+                    <div class="ai-disclaimer">${escapeHtml(data.ai_summary.disclaimer)}</div>
+                </div>
+            `;
+        } else if (!data.ai_summary) {
+            html += `
+                <div class="ai-summary" style="border-color:#3a3b45">
+                    <div class="ai-summary-header">
+                        <span class="badge" style="background:#52525b20;color:#71717a">AI</span>
+                        No API key set
+                    </div>
+                    <div style="font-size:11px;color:#52525b">
+                        Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable AI answers.
+                    </div>
+                </div>
+            `;
+        }
+
+        // Source cards
+        data.results.forEach((result, idx) => {
+            const topLines = result.matched_lines.slice(0, 3);
+            const scoreClass = result.page_score > 0.7 ? 'score-high' :
+                              result.page_score > 0.3 ? 'score-mid' : 'score-low';
+            const scorePercent = Math.round(result.page_score * 100);
+
+            html += `
+                <div class="source-card ${idx === 0 ? 'active' : ''}"
+                     id="source-${idx}" onclick="jumpToSource(${idx})">
+                    <div class="source-meta">
+                        <span class="source-location">Page ${result.page_number}</span>
+                        <span class="source-score ${scoreClass}">${scorePercent}% match</span>
+                    </div>
+            `;
+
+            topLines.forEach(line => {
+                const highlighted = highlightQuery(escapeHtml(line.text), data.query);
+                html += `
+                    <div class="source-text">${highlighted}</div>
+                `;
+                if (line.context_before.length > 0) {
+                    html += `<div class="source-context">${escapeHtml(line.context_before.join(' | '))}</div>`;
+                }
+            });
+
+            html += `
+                    <span class="jump-btn">Jump to page ${result.page_number} &#10132;</span>
+                </div>
+            `;
+        });
+
+        if (data.results.length === 0) {
+            html = '<div class="loading"><p>No matching results found. Try a different query.</p></div>';
+        }
+
+        content.innerHTML = html;
+
+        // Show source nav if multiple results
+        document.getElementById('source-nav').style.display =
+            data.results.length > 1 ? 'flex' : 'none';
+    }
+
+    // --- Jump to Source ---
+    function jumpToSource(idx) {
+        const data = state.searchResults;
+        if (!data || idx < 0 || idx >= data.results.length) return;
+
+        state.currentSourceIdx = idx;
+        const result = data.results[idx];
+
+        // Highlight texts for this page
+        const texts = result.matched_lines.map(ml => ml.text);
+        showPage(result.page_number, texts);
+
+        // Update active card
+        document.querySelectorAll('.source-card').forEach((card, i) => {
+            card.classList.toggle('active', i === idx);
+        });
+
+        // Scroll card into view
+        const card = document.getElementById(`source-${idx}`);
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function navigateSource(delta) {
+        const newIdx = state.currentSourceIdx + delta;
+        if (state.searchResults && newIdx >= 0 && newIdx < state.searchResults.results.length) {
+            jumpToSource(newIdx);
+        }
+    }
+
+    // --- Panel ---
+    function closePanel() {
+        document.getElementById('floating-panel').classList.remove('visible');
+    }
+
+    // --- Helpers ---
+    function highlightQuery(text, query) {
+        const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        const stops = new Set(['what','the','are','how','does','where','when','which','who','can','for','with','from','this','that','about','tell','find','show']);
+        const keywords = words.filter(w => !stops.has(w));
+        if (keywords.length === 0) return text;
+
+        const pattern = keywords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+        return text.replace(new RegExp(`(${pattern})`, 'gi'), '<mark>$1</mark>');
+    }
+
+    function formatAiAnswer(text) {
+        // Escape HTML first, then format [Page X] citations as styled badges
+        let safe = escapeHtml(text);
+        safe = safe.replace(/\[Page\s*(\d+)\]/gi, '<span style="background:#6366f120;color:#818cf8;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;cursor:pointer" onclick="showPage($1)">Page $1</span>');
+        // Convert newlines to <br>
+        safe = safe.replace(/\n/g, '<br>');
+        return safe;
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function showToast(msg) {
+        const toast = document.getElementById('toast');
+        toast.textContent = msg;
+        toast.classList.add('show');
+        setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+</script>
+
+</body>
+</html>
