@@ -1,0 +1,194 @@
+{% extends "appearance/base.html" %}
+{% load i18n %}
+
+{% block title %}Executive Briefing{% endblock %}
+
+{% block content %}
+<style>
+    .brief-container { max-width: 1000px; margin: 0 auto; }
+    .brief-header { margin-bottom: 20px; }
+    .brief-header h3 { margin: 0 0 8px; font-size: 18px; }
+    .brief-header p { color: #888; font-size: 13px; margin: 0; }
+
+    .nav-buttons { display: flex; gap: 8px; margin-bottom: 20px; }
+    .nav-buttons a { padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600; }
+    .nav-btn-primary { background: #0d6efd; color: #fff; }
+    .nav-btn-outline { background: #fff; color: #0d6efd; border: 1px solid #0d6efd; }
+
+    .doc-selector { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .doc-selector h4 { font-size: 14px; margin: 0 0 12px; color: #333; }
+    .doc-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .doc-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; border: 1px solid #ddd; background: #f8f9fa; transition: all 0.15s; }
+    .doc-chip:hover { background: #e8eeff; border-color: #0d6efd; }
+    .doc-chip.selected { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+    .doc-chip .chip-check { font-size: 14px; }
+
+    .prompt-row { display: flex; gap: 8px; margin-top: 12px; }
+    .prompt-row input { flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 13px; outline: none; }
+    .prompt-row input:focus { border-color: #0d6efd; }
+    .prompt-row button { padding: 10px 20px; background: #0d6efd; color: #fff; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+    .prompt-row button:hover { background: #0b5ed7; }
+    .prompt-row button:disabled { background: #aaa; cursor: not-allowed; }
+
+    .briefing-result { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-top: 16px; }
+    .briefing-result h4 { font-size: 14px; color: #888; text-transform: uppercase; margin: 0 0 12px; }
+    .briefing-meta { display: flex; gap: 16px; margin-bottom: 16px; }
+    .briefing-meta .meta-item { background: #f8f9fa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px 16px; text-align: center; }
+    .briefing-meta .meta-value { font-size: 24px; font-weight: 700; color: #0d6efd; }
+    .briefing-meta .meta-label { font-size: 11px; color: #888; }
+    .briefing-text { font-size: 14px; line-height: 1.8; color: #333; white-space: pre-wrap; }
+    .briefing-text strong { color: #0d6efd; }
+
+    .loading-state { text-align: center; padding: 40px; color: #888; }
+    .loading-spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #ddd; border-top-color: #0d6efd; border-radius: 50%; animation: spin 0.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<div class="brief-container">
+    <div class="brief-header">
+        <h3>Executive Briefing</h3>
+        <p>Select documents and generate an AI-powered summary across all of them.</p>
+    </div>
+
+    <div class="nav-buttons">
+        <a href="{% url 'rag_chat:chat_view' %}" class="nav-btn-outline">Back to Chat</a>
+    </div>
+
+    <div class="doc-selector">
+        <h4>Select Documents to Summarize</h4>
+        <div class="doc-list" id="docList">
+            <span style="color:#888;font-size:13px;">Loading documents...</span>
+        </div>
+        <div class="prompt-row">
+            <input type="text" id="promptInput" placeholder="Custom prompt (optional): e.g., 'Identify key differences between these papers'" />
+            <button id="summarizeBtn" onclick="runSummarize()" disabled>Summarize</button>
+        </div>
+    </div>
+
+    <div id="briefingResult"></div>
+</div>
+
+<script>
+var selectedDocs = {};
+var ragUrl = '{{ rag_url }}';
+
+// Load documents from Mayan
+(function() {
+    fetch('/api/v4/documents/?format=json&page_size=50', {
+        headers: { 'X-CSRFToken': getCookie('csrftoken') }
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        var container = document.getElementById('docList');
+        var docs = data.results || [];
+        if (docs.length === 0) {
+            container.innerHTML = '<span style="color:#888;">No documents found.</span>';
+            return;
+        }
+
+        container.innerHTML = '';
+        docs.forEach(function(doc) {
+            var chip = document.createElement('div');
+            chip.className = 'doc-chip';
+            chip.setAttribute('data-id', doc.id);
+            chip.innerHTML = '<span class="chip-check">&#9744;</span> ' + escHtml(doc.label);
+            chip.onclick = function() {
+                if (selectedDocs[doc.id]) {
+                    delete selectedDocs[doc.id];
+                    chip.className = 'doc-chip';
+                    chip.querySelector('.chip-check').innerHTML = '&#9744;';
+                } else {
+                    selectedDocs[doc.id] = doc.label;
+                    chip.className = 'doc-chip selected';
+                    chip.querySelector('.chip-check').innerHTML = '&#9745;';
+                }
+                document.getElementById('summarizeBtn').disabled = Object.keys(selectedDocs).length === 0;
+            };
+            container.appendChild(chip);
+        });
+
+        // Select all by default
+        docs.forEach(function(doc) {
+            selectedDocs[doc.id] = doc.label;
+        });
+        container.querySelectorAll('.doc-chip').forEach(function(chip) {
+            chip.className = 'doc-chip selected';
+            chip.querySelector('.chip-check').innerHTML = '&#9745;';
+        });
+        document.getElementById('summarizeBtn').disabled = false;
+    })
+    .catch(function(err) {
+        document.getElementById('docList').innerHTML = '<span style="color:red;">Error loading documents: ' + err.message + '</span>';
+    });
+})();
+
+function runSummarize() {
+    var docIds = Object.keys(selectedDocs).map(Number);
+    var prompt = document.getElementById('promptInput').value.trim();
+    var btn = document.getElementById('summarizeBtn');
+    var result = document.getElementById('briefingResult');
+
+    btn.disabled = true;
+    btn.textContent = 'Analyzing...';
+    result.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>Analyzing ' + docIds.length + ' documents... This may take 10-30 seconds.</p></div>';
+
+    var payload = { document_ids: docIds };
+    if (prompt) payload.prompt = prompt;
+
+    fetch(ragUrl + '/api/batch/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        btn.disabled = false;
+        btn.textContent = 'Summarize';
+
+        if (data.error) {
+            result.innerHTML = '<div class="briefing-result"><p style="color:red;">' + escHtml(data.error) + '</p></div>';
+            return;
+        }
+
+        var html = '<div class="briefing-result">';
+        html += '<h4>Executive Briefing</h4>';
+
+        html += '<div class="briefing-meta">';
+        html += '<div class="meta-item"><div class="meta-value">' + data.documents_analyzed + '</div><div class="meta-label">Documents</div></div>';
+        html += '<div class="meta-item"><div class="meta-value">' + data.total_sections + '</div><div class="meta-label">Sections Analyzed</div></div>';
+        html += '</div>';
+
+        html += '<div style="margin-bottom:12px;">';
+        (data.document_names || []).forEach(function(name) {
+            html += '<span style="display:inline-block;background:#e8eeff;color:#0d6efd;padding:3px 10px;border-radius:4px;font-size:12px;margin:2px 4px 2px 0;">' + escHtml(name) + '</span>';
+        });
+        html += '</div>';
+
+        html += '<div class="briefing-text">' + formatBriefing(data.briefing || 'No briefing generated.') + '</div>';
+        html += '</div>';
+
+        result.innerHTML = html;
+    })
+    .catch(function(err) {
+        btn.disabled = false;
+        btn.textContent = 'Summarize';
+        result.innerHTML = '<div class="briefing-result"><p style="color:red;">Error: ' + err.message + '</p></div>';
+    });
+}
+
+function formatBriefing(text) {
+    // Convert markdown bold to HTML
+    text = escHtml(text);
+    text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+    text = text.replace(/\n\* /g, '\n&bull; ');
+    return text;
+}
+
+function escHtml(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+
+function getCookie(name) {
+    var v = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)');
+    return v ? v.pop() : '';
+}
+</script>
+{% endblock %}

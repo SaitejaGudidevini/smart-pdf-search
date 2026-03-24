@@ -1,0 +1,81 @@
+auth_type: basic
+board:
+    id: 34
+    name: RE board
+    type: simple
+epic:
+    name: ""
+    link: ""
+installation: Cloud
+issue:
+    fields:
+        custom:
+            - name: Vulnerability
+              key: customfield_10033
+              schema:
+                datatype: any
+            - name: Design
+              key: customfield_10034
+              schema:
+                datatype: array
+                items: design.field.name
+            - name: Flagged
+              key: customfield_10021
+              schema:
+                datatype: array
+                items: option
+            - name: Issue color
+              key: customfield_10017
+              schema:
+                datatype: string
+            - name: Rank
+              key: customfield_10019
+              schema:
+                datatype: any
+            - name: Start date
+              key: customfield_10015
+              schema:
+                datatype: date
+            - name: Development
+              key: customfield_10000
+              schema:
+                datatype: any
+            - name: Team
+              key: customfield_10001
+              schema:
+                datatype: team
+    types:
+        - id: "10037"
+          name: Epic
+          handle: Epic
+          subtask: false
+        - id: "10038"
+          name: Subtask
+          handle: Subtask
+          subtask: true
+        - id: "10039"
+          name: Task
+          handle: Task
+          subtask: false
+        - id: "10040"
+          name: Story
+          handle: Story
+          subtask: false
+        - id: "10041"
+          name: Feature
+          handle: Feature
+          subtask: false
+        - id: "10042"
+          name: Request
+          handle: Request
+          subtask: false
+        - id: "10043"
+          name: Bug
+          handle: Bug
+          subtask: false
+login: saiusual8@gmail.com
+project:
+    key: RE
+    type: next-gen
+server: https://saiusual8.atlassian.net
+timezone: America/Chicago

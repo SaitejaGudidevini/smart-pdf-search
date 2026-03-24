@@ -1,0 +1,41 @@
+{
+  "title": "Research Paper Frontmatter Fixture",
+  "document_name": "frontmatter-fixture.pdf",
+  "document_key": "fixture:frontmatter",
+  "doc_type": "research_paper_with_images",
+  "pages": [
+    {
+      "page_number": 1,
+      "sections": [
+        {
+          "title": "Sample Research Paper",
+          "level": 1,
+          "content": "Sample Research Paper\nVisions and Challenges Ahead\nAlice Smith\nalice@example.edu\nUniversity of Somewhere\nBob Lee\nbob@example.edu\nInstitute of Systems\nAbstract",
+          "lines": [{"line_number": 1, "text": "Sample Research Paper"}]
+        },
+        {
+          "title": "Abstract",
+          "level": 2,
+          "content": "This paper studies robust chunking for retrieval augmented generation systems. We compare frontmatter suppression, section-aware splitting, and paragraph reconstruction for technical PDFs.",
+          "lines": [{"line_number": 10, "text": "This paper studies robust chunking"}]
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "content": "Technical PDFs often contain title blocks, author lists, and venue headers that should not dominate retrieval. A good chunker preserves section boundaries while reducing trivial fragments.",
+          "lines": [{"line_number": 18, "text": "Technical PDFs often contain title blocks"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 2,
+    "max_children": 4,
+    "max_duplicate_children": 2,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["Abstract", "Introduction"],
+    "forbidden_section_patterns": ["alice@example.edu", "bob@example.edu", "University of Somewhere"],
+    "min_parent_chars": 140
+  }
+}

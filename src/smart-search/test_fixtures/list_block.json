@@ -1,0 +1,48 @@
+{
+  "title": "List Block Fixture",
+  "document_name": "list-fixture.pdf",
+  "document_key": "fixture:list",
+  "doc_type": "general",
+  "pages": [
+    {
+      "page_number": 1,
+      "sections": [
+        {
+          "title": "System Requirements",
+          "level": 2,
+          "content": "System Requirements",
+          "lines": [{"line_number": 1, "text": "System Requirements"}]
+        },
+        {
+          "title": "System Requirements",
+          "level": 3,
+          "content": "The platform must satisfy the following functional requirements before production deployment:\n1. Authentication via OAuth2 with support for SAML and OIDC federation\n2. Rate limiting at 100 requests per second per tenant with adaptive backoff\n3. Audit logging for all mutation operations including document uploads and deletions\n4. Role-based access control with at least four permission levels: viewer, editor, admin, and superadmin\n5. Full-text search with sub-200ms p95 latency across document collections up to one million records\n6. Webhook delivery with at-least-once semantics and configurable retry policies",
+          "section_type": "list",
+          "lines": [{"line_number": 2, "text": "The platform must satisfy the following"}]
+        },
+        {
+          "title": "Architecture Overview",
+          "level": 2,
+          "content": "Architecture Overview",
+          "lines": [{"line_number": 20, "text": "Architecture Overview"}]
+        },
+        {
+          "title": "Architecture Overview",
+          "level": 3,
+          "content": "The system follows a microservices architecture with an API gateway fronting five core services. Each service owns its data store and communicates via asynchronous events through a message broker.",
+          "lines": [{"line_number": 21, "text": "The system follows a microservices architecture"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 3,
+    "max_children": 6,
+    "max_duplicate_children": 1,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["System Requirements", "Architecture Overview"],
+    "forbidden_section_patterns": [],
+    "min_parent_chars": 120
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "title": "Research Paper References Fixture",
+  "document_name": "references-fixture.pdf",
+  "document_key": "fixture:references",
+  "doc_type": "research_paper",
+  "pages": [
+    {
+      "page_number": 2,
+      "sections": [
+        {
+          "title": "Results",
+          "level": 2,
+          "content": "Our chunking pipeline reduces noisy one-line fragments and preserves retrieval-relevant paragraphs. It also separates prose from captions and structured artifacts more consistently.",
+          "lines": [{"line_number": 1, "text": "Our chunking pipeline reduces noisy one-line fragments"}]
+        }
+      ]
+    },
+    {
+      "page_number": 3,
+      "sections": [
+        {
+          "title": "[body]",
+          "level": 3,
+          "content": "References\n[1] Example Author. Example citation one.\n[2] Another Author. Example citation two.\n[3] Third Author. Example citation three.",
+          "lines": [{"line_number": 50, "text": "References"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 2,
+    "max_children": 4,
+    "max_duplicate_children": 1,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["Results"],
+    "forbidden_section_patterns": ["References", "\\[1\\]", "\\[2\\]", "\\[3\\]"],
+    "min_parent_chars": 120
+  }
+}

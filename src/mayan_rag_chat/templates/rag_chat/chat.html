@@ -1,0 +1,346 @@
+{% extends "appearance/base.html" %}
+{% load i18n %}
+
+{% block title %}RAG Document Chat{% endblock %}
+
+{% block content %}
+<style>
+    .rag-layout { display: flex; gap: 0; height: calc(100vh - 120px); }
+
+    /* Left: Chat panel */
+    .rag-chat-panel { flex: 1; display: flex; flex-direction: column; min-width: 400px; }
+    .rag-chat-box { flex: 1; overflow-y: auto; padding: 16px; background: #fff; border: 1px solid #ddd; border-radius: 8px 8px 0 0; }
+    .rag-input-row { display: flex; gap: 8px; padding: 12px; background: #fff; border: 1px solid #ddd; border-top: none; border-radius: 0 0 8px 8px; }
+    .rag-input-row input { flex: 1; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; outline: none; }
+    .rag-input-row input:focus { border-color: #0d6efd; }
+    .rag-input-row button { padding: 10px 24px; background: #0d6efd; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; }
+    .rag-input-row button:hover { background: #0b5ed7; }
+    .rag-input-row button:disabled { background: #aaa; cursor: not-allowed; }
+
+    /* Messages */
+    .rag-message { margin-bottom: 16px; }
+    .rag-message.user { text-align: right; }
+    .rag-message .bubble { display: inline-block; max-width: 85%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.6; }
+    .rag-message.user .bubble { background: #0d6efd; color: #fff; }
+    .rag-message.bot .bubble { background: #f0f0f0; color: #333; }
+    .rag-disclaimer { font-size: 10px; color: #999; font-style: italic; margin-top: 4px; }
+    .rag-loading { color: #888; font-style: italic; }
+
+    /* Source cards */
+    .rag-sources { margin-top: 8px; }
+    .rag-source-card {
+        background: #fff; border: 1px solid #e0e0e0; border-left: 3px solid #0d6efd;
+        border-radius: 6px; padding: 10px 12px; margin-bottom: 6px; font-size: 12px;
+        cursor: pointer; transition: all 0.15s;
+    }
+    .rag-source-card:hover { background: #f0f4ff; border-left-color: #0b5ed7; }
+    .rag-source-card.active { background: #e8eeff; border-left-color: #0b5ed7; }
+    .rag-source-card .score { float: right; color: #28a745; font-weight: 600; font-size: 11px; }
+    .rag-source-card .source-title { color: #0d6efd; font-weight: 600; }
+    .rag-source-card .source-preview { color: #555; margin-top: 4px; line-height: 1.4; }
+    .rag-source-card .source-preview mark { background: #fff3cd; padding: 1px 2px; border-radius: 2px; }
+    .rag-source-card .view-link { color: #0d6efd; font-size: 11px; margin-top: 4px; display: inline-block; }
+
+    /* Right: PDF Viewer panel */
+    .rag-viewer-panel {
+        width: 0; overflow: hidden; transition: width 0.3s ease;
+        background: #f5f5f5; border-left: 1px solid #ddd; display: flex; flex-direction: column;
+    }
+    .rag-viewer-panel.open { width: 55%; }
+    .viewer-header {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 10px 16px; background: #fff; border-bottom: 1px solid #ddd; flex-shrink: 0;
+    }
+    .viewer-header h4 { margin: 0; font-size: 14px; color: #333; }
+    .viewer-header .page-info { font-size: 12px; color: #888; }
+    .viewer-close { background: none; border: none; font-size: 20px; cursor: pointer; color: #888; padding: 0 8px; }
+    .viewer-close:hover { color: #333; }
+    .viewer-body { flex: 1; overflow: auto; padding: 16px; display: flex; justify-content: center; align-items: flex-start; }
+    .viewer-body img { max-width: 100%; border-radius: 4px; box-shadow: 0 2px 12px rgba(0,0,0,0.15); }
+    .viewer-nav { display: flex; gap: 8px; padding: 8px 16px; background: #fff; border-top: 1px solid #ddd; flex-shrink: 0; }
+    .viewer-nav button { flex: 1; padding: 6px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .viewer-nav button:hover { background: #e0e0e0; }
+    .viewer-highlight-info { padding: 8px 16px; background: #fff8e1; border-bottom: 1px solid #ffe082; font-size: 12px; color: #795548; flex-shrink: 0; }
+</style>
+
+<div style="display:flex;gap:12px;margin-bottom:12px;">
+    <a href="/rag_chat/chat/" style="padding:8px 20px;background:#0d6efd;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">💬 Chat</a>
+    <a href="/rag_chat/index/" style="padding:8px 20px;background:#28a745;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">📄 Index Documents</a>
+    <a href="/rag_chat/chunks/" style="padding:8px 20px;background:#fd7e14;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">🧩 View Chunks</a>
+    <a href="/rag_chat/summarize/" style="padding:8px 20px;background:#6f42c1;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">📊 Executive Briefing</a>
+    <a href="/documents/" style="padding:8px 20px;background:#6c757d;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">📁 All Documents</a>
+</div>
+<div class="rag-layout">
+    <!-- Chat Panel -->
+    <div class="rag-chat-panel">
+        <div class="rag-chat-box" id="chat-box">
+            <div class="rag-message bot">
+                <div class="bubble">
+                    Hi! Ask me anything about your documents. Click on any source to see the highlighted page.
+                </div>
+            </div>
+        </div>
+        <div class="rag-input-row">
+            <input type="text" id="query-input" placeholder="Ask about your documents..."
+                   onkeydown="if(event.key==='Enter')sendQuery()" autofocus>
+            <button id="send-btn" onclick="sendQuery()">Search</button>
+        </div>
+    </div>
+
+    <!-- PDF Viewer Panel -->
+    <div class="rag-viewer-panel" id="viewer-panel">
+        <div class="viewer-header">
+            <div>
+                <h4 id="viewer-title">Document Viewer</h4>
+                <span class="page-info" id="viewer-page-info"></span>
+            </div>
+            <button class="viewer-close" onclick="closeViewer()">&times;</button>
+        </div>
+        <div class="viewer-highlight-info" id="viewer-highlight-info" style="display:none">
+            Highlighted text from search result
+        </div>
+        <div class="viewer-body" id="viewer-body">
+            <img id="viewer-img" src="" alt="PDF Page">
+        </div>
+        <div class="viewer-nav">
+            <button onclick="viewerNav(-1)">&larr; Prev Page</button>
+            <button onclick="viewerNav(1)">Next Page &rarr;</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const RAG_SIDECAR = 'http://localhost:8080';
+let viewerState = { docId: null, pageNum: 0, totalPages: 30 };
+let lastQuery = '';
+let lastResults = [];
+
+function sendQuery() {
+    const input = document.getElementById('query-input');
+    const query = input.value.trim();
+    if (!query) return;
+    lastQuery = query;
+
+    const chatBox = document.getElementById('chat-box');
+    const btn = document.getElementById('send-btn');
+
+    chatBox.innerHTML += `<div class="rag-message user"><div class="bubble">${escapeHtml(query)}</div></div>`;
+
+    const loadingId = 'loading-' + Date.now();
+    chatBox.innerHTML += `<div class="rag-message bot" id="${loadingId}"><div class="bubble rag-loading">Searching documents...</div></div>`;
+    chatBox.scrollTop = chatBox.scrollHeight;
+
+    input.value = '';
+    btn.disabled = true;
+
+    fetch('/rag_chat/api/search/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
+        body: JSON.stringify({ query: query })
+    })
+    .then(r => r.json())
+    .then(data => {
+        const el = document.getElementById(loadingId);
+        if (!el) return;
+
+        let html = '';
+
+        // AI Answer
+        if (data.ai_answer && data.ai_answer.text) {
+            html += `<div class="bubble">${formatAnswer(data.ai_answer.text)}</div>`;
+            html += `<div class="rag-disclaimer">AI answer by ${escapeHtml(data.ai_answer.model || 'Groq')}. Verify against sources below.</div>`;
+        } else if (data.results && data.results.length > 0) {
+            html += `<div class="bubble">Found ${data.results.length} relevant sections. Click a source to view the highlighted page.</div>`;
+        } else {
+            html += `<div class="bubble">No relevant sections found. Try a different query.</div>`;
+        }
+
+        // Source cards — clickable to open PDF viewer with bbox highlighting
+        lastResults = data.results || [];
+        if (lastResults.length > 0) {
+            html += '<div class="rag-sources">';
+            lastResults.forEach((r, idx) => {
+                const scorePercent = Math.round((r.page_score || 0) * 100);
+                const firstChunk = r.chunks && r.chunks[0] ? r.chunks[0] : {};
+                const preview = (firstChunk.text || '').substring(0, 200);
+                const highlighted = highlightQuery(escapeHtml(preview), query);
+                html += `<div class="rag-source-card" onclick="openPageWithBboxes(${idx}, this)" id="src-${idx}">
+                    <span class="score">${scorePercent}%</span>
+                    <span class="source-title">${escapeHtml(r.label)}</span> &mdash; Page ${r.page_number}
+                    <div class="source-preview">${highlighted}</div>
+                    <span class="view-link">View highlighted page &rarr;</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+
+        el.innerHTML = html;
+        chatBox.scrollTop = chatBox.scrollHeight;
+
+        // Auto-open first result in viewer
+        if (lastResults.length > 0) {
+            openPageWithBboxes(0, document.getElementById('src-0'));
+        }
+    })
+    .catch(err => {
+        const el = document.getElementById(loadingId);
+        if (el) el.innerHTML = `<div class="bubble">Error: ${escapeHtml(err.message)}</div>`;
+    })
+    .finally(() => { btn.disabled = false; });
+}
+
+function openPageWithBboxes(resultIdx, cardEl) {
+    const r = lastResults[resultIdx];
+    if (!r) return;
+
+    viewerState.docId = r.doc_id;
+    viewerState.pageNum = r.page_number;
+
+    // Highlight active card
+    document.querySelectorAll('.rag-source-card').forEach(c => c.classList.remove('active'));
+    if (cardEl) cardEl.classList.add('active');
+
+    // Open viewer panel
+    document.getElementById('viewer-panel').classList.add('open');
+    document.getElementById('viewer-title').textContent = r.label;
+    document.getElementById('viewer-page-info').textContent = `Page ${r.page_number}`;
+
+    // Show match info
+    const infoEl = document.getElementById('viewer-highlight-info');
+    const firstChunk = r.chunks && r.chunks[0] ? r.chunks[0] : {};
+    infoEl.textContent = `Highlighted: ${r.highlight_bboxes ? r.highlight_bboxes.length : 0} regions matching your query`;
+    infoEl.style.display = 'block';
+
+    // Load page with bounding box highlights (exact coordinates from PyMuPDF)
+    const img = document.getElementById('viewer-img');
+    img.src = '';
+    img.alt = 'Loading highlighted page...';
+
+    const bboxes = r.highlight_bboxes || [];
+
+    if (bboxes.length > 0) {
+        // Use exact bounding boxes — this is what makes the yellow highlights work
+        fetch(`${RAG_SIDECAR}/api/page/${r.page_number}/highlighted`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bboxes: bboxes })
+        })
+        .then(resp => resp.blob())
+        .then(blob => { img.src = URL.createObjectURL(blob); })
+        .catch(() => { img.src = `${RAG_SIDECAR}/api/page/${r.page_number}`; });
+    } else {
+        // Fallback: highlight query keywords via text search
+        const texts = lastQuery.split(/\s+/).filter(w => w.length > 2);
+        fetch(`${RAG_SIDECAR}/api/page/${r.page_number}/highlighted`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ texts: texts })
+        })
+        .then(resp => resp.blob())
+        .then(blob => { img.src = URL.createObjectURL(blob); })
+        .catch(() => { img.src = `${RAG_SIDECAR}/api/page/${r.page_number}`; });
+    }
+}
+
+function jumpToPage(pageNum) {
+    // Find a result for this page, or just show it plain
+    const idx = lastResults.findIndex(r => r.page_number === pageNum);
+    if (idx >= 0) {
+        openPageWithBboxes(idx, document.getElementById('src-' + idx));
+    } else {
+        viewerState.pageNum = pageNum;
+        document.getElementById('viewer-panel').classList.add('open');
+        document.getElementById('viewer-page-info').textContent = `Page ${pageNum}`;
+        document.getElementById('viewer-img').src = `${RAG_SIDECAR}/api/page/${pageNum}`;
+    }
+}
+
+function viewerNav(delta) {
+    const newPage = viewerState.pageNum + delta;
+    if (newPage >= 1 && newPage <= viewerState.totalPages) {
+        viewerState.pageNum = newPage;
+        document.getElementById('viewer-page-info').textContent = `Page ${newPage}`;
+        document.getElementById('viewer-highlight-info').style.display = 'none';
+        document.getElementById('viewer-img').src = `${RAG_SIDECAR}/api/page/${newPage}`;
+    }
+}
+
+function closeViewer() {
+    document.getElementById('viewer-panel').classList.remove('open');
+}
+
+function extractHighlightTerms(query, matchText) {
+    // Strategy: use meaningful keywords from the query + key phrases from matched text
+    const stops = new Set(['what','the','are','how','does','where','when','which','who','can','for',
+        'with','from','this','that','about','tell','find','show','being','used','also','more','into',
+        'been','have','has','was','were','will','would','could','should','than','they','their','these',
+        'those','some','such','only','very','just','but','and','not','all','any','each','every','its']);
+
+    // Get meaningful words from query
+    const queryWords = query.toLowerCase().split(/\s+/)
+        .filter(w => w.length > 2 && !stops.has(w));
+
+    // Get 2-3 word phrases from the matched text that contain query words
+    let clean = matchText.replace(/\[Section:.*?\]\s*/g, '').replace(/\[Clause:.*?\]\s*/g, '');
+    const phrases = [];
+
+    // Find short phrases (3-6 words) from the text that contain a query keyword
+    const words = clean.split(/\s+/);
+    for (let i = 0; i < words.length - 2; i++) {
+        const phrase = words.slice(i, i + 4).join(' ').replace(/[^a-zA-Z0-9\s-]/g, '').trim();
+        if (phrase.length > 10 && phrase.length < 60) {
+            const lower = phrase.toLowerCase();
+            if (queryWords.some(qw => lower.includes(qw))) {
+                phrases.push(phrase);
+                if (phrases.length >= 3) break;
+                i += 3; // skip ahead
+            }
+        }
+    }
+
+    // Fallback: just use the query keywords individually
+    if (phrases.length === 0) {
+        return queryWords.slice(0, 4);
+    }
+    return phrases;
+}
+
+function highlightQuery(text, query) {
+    const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    const stops = new Set(['what','the','are','how','does','where','when','which','who','can','for','with','from','this','that','about']);
+    const keywords = words.filter(w => !stops.has(w));
+    if (!keywords.length) return text;
+    const pattern = keywords.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    return text.replace(new RegExp(`(${pattern})`, 'gi'), '<mark>$1</mark>');
+}
+
+function formatAnswer(text) {
+    let safe = escapeHtml(text);
+    // Format [Page X] citations as clickable badges
+    safe = safe.replace(/\[Page\s*(\d+)\]/gi, '<span style="background:#e8eeff;color:#0d6efd;padding:1px 6px;border-radius:3px;font-size:11px;font-weight:600;cursor:pointer" onclick="jumpToPage($1)">Page $1</span>');
+    safe = safe.replace(/\n/g, '<br>');
+    return safe;
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+}
+
+function escapeAttr(str) {
+    if (!str) return '';
+    return str.replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/\n/g, ' ');
+}
+
+function getCookie(name) {
+    const cookies = document.cookie.split(';');
+    for (let c of cookies) {
+        c = c.trim();
+        if (c.startsWith(name + '=')) return c.substring(name.length + 1);
+    }
+    return '';
+}
+</script>
+{% endblock %}

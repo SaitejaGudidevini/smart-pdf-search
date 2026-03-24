@@ -1,0 +1,48 @@
+{
+  "title": "Layout Noise Fixture",
+  "document_name": "layout-noise-fixture.pdf",
+  "document_key": "fixture:layout-noise",
+  "doc_type": "research_paper_with_images",
+  "pages": [
+    {
+      "page_number": 1,
+      "sections": [
+        {
+          "title": "Why Memory Matters: Context Is Changing",
+          "level": 2,
+          "content": "LLM evaluations show that real context ability involves more than retrieval. It requires multi-hop reasoning, aggregation, and sustained coherence as context length scales.",
+          "lines": [{"line_number": 60, "text": "LLM evaluations show that real context ability"}]
+        },
+        {
+          "title": "Figure 1: System Overview",
+          "level": 3,
+          "content": "Figure 1: System Overview\nThis figure illustrates the memory hierarchy used by the agents.",
+          "lines": [{"line_number": 70, "text": "Figure 1: System Overview"}]
+        },
+        {
+          "title": "[image]",
+          "level": 3,
+          "content": "bbox:120.0,220.0,480.0,500.0",
+          "section_type": "image",
+          "lines": []
+        },
+        {
+          "title": "• Multimodal inputs and structured traces",
+          "level": 3,
+          "content": "• Multimodal inputs require joint reasoning over diagrams and screenshots.\n• Structured traces show that agents increasingly operate over executable context.",
+          "lines": [{"line_number": 82, "text": "• Multimodal inputs require joint reasoning"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 3,
+    "max_children": 6,
+    "max_duplicate_children": 3,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["Why Memory Matters: Context Is Changing"],
+    "forbidden_section_patterns": ["bbox:"],
+    "min_parent_chars": 120
+  }
+}

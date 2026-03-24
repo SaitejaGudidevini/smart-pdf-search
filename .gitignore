@@ -1,0 +1,36 @@
+# Secrets
+.env
+docker/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Caches
+cache/
+uploads/
+*.log
+
+# Claude Flow
+.claude-flow/
+
+# Large files
+*.pdf
+out/
+*.mp4
+*.mp3
+
+# Node
+node_modules/

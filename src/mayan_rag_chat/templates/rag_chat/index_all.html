@@ -1,0 +1,82 @@
+{% extends "appearance/base.html" %}
+{% load i18n %}
+
+{% block title %}Index Documents for RAG{% endblock %}
+
+{% block content %}
+<style>
+    .index-container { max-width: 600px; margin: 0 auto; }
+    .index-card { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 24px; text-align: center; }
+    .index-card h3 { margin-bottom: 12px; }
+    .index-card p { color: #666; margin-bottom: 20px; }
+    .index-btn { padding: 12px 32px; background: #0d6efd; color: #fff; border: none; border-radius: 8px; cursor: pointer; font-size: 15px; }
+    .index-btn:hover { background: #0b5ed7; }
+    .index-btn:disabled { background: #aaa; }
+    .index-result { margin-top: 16px; padding: 12px; background: #d4edda; border-radius: 6px; display: none; }
+    .index-stats { margin-top: 12px; font-size: 13px; color: #666; }
+</style>
+
+<div style="display:flex;gap:12px;margin-bottom:12px;max-width:600px;margin-left:auto;margin-right:auto;">
+    <a href="/rag_chat/chat/" style="padding:8px 20px;background:#0d6efd;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">💬 Chat</a>
+    <a href="/rag_chat/index/" style="padding:8px 20px;background:#28a745;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">📄 Index Documents</a>
+    <a href="/documents/" style="padding:8px 20px;background:#6c757d;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;font-weight:600;">📁 All Documents</a>
+</div>
+<div class="index-container">
+    <div class="index-card">
+        <h3>Index All Documents for RAG Chat</h3>
+        <p>This will extract text from all <strong>{{ document_count }}</strong> documents and index them for semantic search.</p>
+
+        <div class="index-stats">
+            Currently indexed: <strong>{{ stats.total_chunks }}</strong> chunks across <strong>{{ stats.unique_docs }}</strong> documents
+        </div>
+
+        <br>
+        <button class="index-btn" id="index-btn" onclick="indexAll()">Index All Documents</button>
+
+        <div class="index-result" id="result"></div>
+    </div>
+</div>
+
+<script>
+function indexAll() {
+    const btn = document.getElementById('index-btn');
+    const result = document.getElementById('result');
+    btn.disabled = true;
+    btn.textContent = 'Indexing...';
+    result.style.display = 'none';
+
+    fetch('{% url "rag_chat:index_all_view" %}', {
+        method: 'POST',
+        headers: { 'X-CSRFToken': getCookie('csrftoken') },
+    })
+    .then(r => r.json())
+    .then(data => {
+        result.style.display = 'block';
+        result.innerHTML = `
+            <strong>Done!</strong> Indexed <strong>${data.chunks_indexed}</strong> chunks
+            from <strong>${data.documents}</strong> documents.<br>
+            <small>Total: ${data.stats.total_chunks} chunks (${data.stats.parents} parents, ${data.stats.children} children)</small>
+            ${data.errors.length ? '<br><small style="color:red">Errors: ' + data.errors.length + '</small>' : ''}
+        `;
+    })
+    .catch(err => {
+        result.style.display = 'block';
+        result.style.background = '#f8d7da';
+        result.textContent = 'Error: ' + err.message;
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.textContent = 'Index All Documents';
+    });
+}
+
+function getCookie(name) {
+    const cookies = document.cookie.split(';');
+    for (let c of cookies) {
+        c = c.trim();
+        if (c.startsWith(name + '=')) return c.substring(name.length + 1);
+    }
+    return '';
+}
+</script>
+{% endblock %}

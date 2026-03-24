@@ -1,0 +1,115 @@
+version: "3.9"
+
+services:
+  # ============================================================
+  # MAYAN EDMS + RAG Chat (single port 8000)
+  # ============================================================
+  mayan-app:
+    image: mayanedms/mayanedms:latest
+    container_name: mayan-app
+    environment:
+      MAYAN_CELERY_BROKER_URL: amqp://mayan:mayan@rabbitmq:5672/mayan
+      MAYAN_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      MAYAN_DATABASES: "{'default':{'ENGINE':'django.db.backends.postgresql','NAME':'mayan','USER':'mayan','PASSWORD':'mayan','HOST':'postgresql','PORT':'5432'}}"
+      MAYAN_REDIS_URL: redis://redis:6379/0
+      MAYAN_DOCKER_WAIT: "postgresql:5432 rabbitmq:5672 redis:6379"
+      # Register RAG Chat as a Mayan app
+      MAYAN_PIP_INSTALLS: httpx
+      MAYAN_COMMON_EXTRA_APPS: "['mayan_rag_chat.apps.RAGChatApp']"
+      HF_HOME: /tmp/hf_cache
+      FASTEMBED_CACHE_PATH: /tmp/fastembed_cache
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # RAG sidecar URL (called by Mayan Django app internally)
+      RAG_SIDECAR_URL: http://rag-sidecar:8080
+    ports:
+      - "8000:8000"
+    volumes:
+      - mayan-media:/var/lib/mayan
+      # Mount the RAG chat app into Mayan's Python path
+      - ../src/mayan_rag_chat:/opt/mayan-edms/lib/python3.13/site-packages/mayan_rag_chat
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgresql:
+    image: pgvector/pgvector:pg15
+    container_name: mayan-postgres
+    environment:
+      POSTGRES_DB: mayan
+      POSTGRES_USER: mayan
+      POSTGRES_PASSWORD: mayan
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mayan"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: mayan-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: mayan
+      RABBITMQ_DEFAULT_PASS: mayan
+      RABBITMQ_DEFAULT_VHOST: mayan
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: mayan-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # RAG Sidecar — runs embedding model in its own container
+  rag-sidecar:
+    build:
+      context: ../src/smart-search
+      dockerfile: Dockerfile
+    container_name: rag-sidecar
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+    environment:
+      MAYAN_API_URL: http://mayan-app:8000/api/v4
+      MAYAN_PASSWORD: admin123
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      RAG_PGHOST: postgresql
+      RAG_PGPORT: 5432
+      RAG_PGDATABASE: mayan
+      RAG_PGUSER: mayan
+      RAG_PGPASSWORD: mayan
+      RAG_PG_SCHEMA: rag
+    ports:
+      - "8080:8080"
+    volumes:
+      - rag-cache:/app/cache
+      - rag-uploads:/app/uploads
+    depends_on:
+      mayan-app:
+        condition: service_started
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mayan-media:
+  postgres-data:
+  rag-cache:
+  rag-uploads:

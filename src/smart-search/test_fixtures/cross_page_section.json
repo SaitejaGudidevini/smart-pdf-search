@@ -1,0 +1,58 @@
+{
+  "title": "Cross-Page Section Fixture",
+  "document_name": "cross-page-fixture.pdf",
+  "document_key": "fixture:cross-page",
+  "doc_type": "research_paper",
+  "pages": [
+    {
+      "page_number": 1,
+      "sections": [
+        {
+          "title": "Introduction",
+          "level": 2,
+          "content": "Introduction",
+          "lines": [{"line_number": 1, "text": "Introduction"}]
+        },
+        {
+          "title": "Introduction",
+          "level": 3,
+          "content": "Document chunking is a critical step in retrieval augmented generation pipelines. The quality of chunks directly determines retrieval precision and downstream answer quality. Poor chunking leads to lost context, garbled tables, and orphaned list items that confuse both the embedding model and the language model.",
+          "lines": [{"line_number": 2, "text": "Document chunking is a critical step"}]
+        }
+      ]
+    },
+    {
+      "page_number": 2,
+      "sections": [
+        {
+          "title": "Introduction",
+          "level": 3,
+          "content": "In this paper we present a structure-aware chunking pipeline that addresses these problems. Our approach combines font-based heading detection, cross-page section merging, semantic boundary detection, and contextual enrichment to produce high-quality chunks suitable for vector search and LLM consumption.",
+          "lines": [{"line_number": 30, "text": "In this paper we present a structure-aware"}]
+        },
+        {
+          "title": "Methodology",
+          "level": 2,
+          "content": "Methodology",
+          "lines": [{"line_number": 40, "text": "Methodology"}]
+        },
+        {
+          "title": "Methodology",
+          "level": 3,
+          "content": "We evaluate our pipeline on three document types: research papers, contracts, and general documents. For each type we measure parent and child chunk counts, duplicate ratios, and retrieval accuracy on a held-out query set of fifty questions.",
+          "lines": [{"line_number": 41, "text": "We evaluate our pipeline on three document types"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 3,
+    "max_children": 6,
+    "max_duplicate_children": 1,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["Introduction", "Methodology"],
+    "forbidden_section_patterns": [],
+    "min_parent_chars": 140
+  }
+}

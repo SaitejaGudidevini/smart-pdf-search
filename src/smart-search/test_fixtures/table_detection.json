@@ -1,0 +1,48 @@
+{
+  "title": "Table Detection Fixture",
+  "document_name": "table-fixture.pdf",
+  "document_key": "fixture:table",
+  "doc_type": "general",
+  "pages": [
+    {
+      "page_number": 1,
+      "sections": [
+        {
+          "title": "Performance Results",
+          "level": 2,
+          "content": "Performance Results",
+          "lines": [{"line_number": 1, "text": "Performance Results"}]
+        },
+        {
+          "title": "Performance Results",
+          "level": 3,
+          "content": "The following table summarizes the benchmark results across all models tested. Each model was evaluated on three datasets with five-fold cross validation to ensure statistical reliability.",
+          "lines": [{"line_number": 2, "text": "The following table summarizes the benchmark results"}]
+        },
+        {
+          "title": "[Table on page 1]",
+          "level": 3,
+          "content": "Model | Accuracy | F1 Score | Latency\n---+---+---+---\nBERT-base | 94.2% | 93.1% | 45ms\nRoBERTa-large | 95.8% | 95.0% | 78ms\nDeBERTa-v3 | 96.1% | 95.5% | 92ms\nDistilBERT | 91.3% | 90.2% | 22ms",
+          "section_type": "table",
+          "lines": []
+        },
+        {
+          "title": "Performance Results",
+          "level": 3,
+          "content": "As shown in the table above, DeBERTa-v3 achieves the highest accuracy and F1 score, though with increased latency. DistilBERT offers the best speed-accuracy tradeoff for latency-sensitive deployments.",
+          "lines": [{"line_number": 20, "text": "As shown in the table above"}]
+        }
+      ]
+    }
+  ],
+  "expectations": {
+    "max_parents": 3,
+    "max_children": 6,
+    "max_duplicate_children": 2,
+    "max_short_parents": 0,
+    "max_forbidden_hits": 0,
+    "must_include_sections": ["Performance Results"],
+    "forbidden_section_patterns": [],
+    "min_parent_chars": 100
+  }
+}

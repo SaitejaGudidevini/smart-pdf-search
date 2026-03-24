@@ -1,0 +1,142 @@
+{% extends "appearance/base.html" %}
+{% load i18n %}
+
+{% block title %}AI Insights: {{ document.label }}{% endblock %}
+
+{% block content %}
+<style>
+    .nudge-container { max-width: 1200px; margin: 0 auto; }
+    .nudge-header { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+    .nudge-header h3 { margin: 0; font-size: 18px; }
+    .nudge-header .doc-badge { background: #e8eeff; color: #0d6efd; padding: 4px 12px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+    .nudge-header .type-badge { background: #d4edda; color: #155724; padding: 4px 12px; border-radius: 6px; font-size: 12px; }
+
+    .nav-buttons { display: flex; gap: 8px; margin-bottom: 20px; }
+    .nav-buttons a { padding: 8px 16px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 600; }
+    .nav-btn-primary { background: #0d6efd; color: #fff; }
+    .nav-btn-secondary { background: #6c757d; color: #fff; }
+    .nav-btn-outline { background: #fff; color: #0d6efd; border: 1px solid #0d6efd; }
+
+    .loading-state { text-align: center; padding: 40px; color: #888; }
+    .loading-spinner { display: inline-block; width: 24px; height: 24px; border: 3px solid #ddd; border-top-color: #0d6efd; border-radius: 50%; animation: spin 0.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .related-grid { display: flex; flex-direction: column; gap: 12px; }
+    .related-card { background: #fff; border: 1px solid #e0e0e0; border-radius: 8px; padding: 16px; transition: box-shadow 0.2s; }
+    .related-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+    .related-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .related-card-title { font-size: 15px; font-weight: 600; color: #333; }
+    .related-card-title a { color: #0d6efd; text-decoration: none; }
+    .related-card-title a:hover { text-decoration: underline; }
+    .similarity-badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+    .sim-high { background: #d4edda; color: #155724; }
+    .sim-medium { background: #fff3cd; color: #856404; }
+    .sim-low { background: #f8d7da; color: #721c24; }
+    .related-card-type { font-size: 12px; color: #888; margin-bottom: 8px; }
+
+    .matching-sections { margin-top: 10px; }
+    .matching-sections h5 { font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 6px; }
+    .match-item { background: #f8f9fa; border-left: 3px solid #0d6efd; border-radius: 4px; padding: 8px 12px; margin-bottom: 6px; font-size: 13px; }
+    .match-item .match-section { font-weight: 600; color: #0d6efd; }
+    .match-item .match-page { color: #888; font-size: 11px; }
+    .match-item .match-preview { color: #555; margin-top: 4px; line-height: 1.4; }
+    .match-item .match-score { float: right; font-size: 11px; color: #28a745; font-weight: 600; }
+
+    .no-results { text-align: center; padding: 40px; color: #888; }
+    .no-results .icon { font-size: 48px; margin-bottom: 12px; }
+</style>
+
+<div class="nudge-container">
+    <div class="nudge-header">
+        <h3>AI Insights</h3>
+        {% if document %}
+        <span class="doc-badge">{{ document.label }}</span>
+        {% if doc_type %}
+        <span class="type-badge">{{ doc_type }}</span>
+        {% endif %}
+        {% endif %}
+    </div>
+
+    <div class="nav-buttons">
+        <a href="{% url 'rag_chat:chat_view' %}" class="nav-btn-outline">Back to Chat</a>
+        {% if document %}
+        <a href="/documents/documents/{{ document.pk }}/preview/" class="nav-btn-secondary">View Document</a>
+        <a href="{% url 'rag_chat:chunk_inspect_view' document.pk %}" class="nav-btn-outline">View Chunks</a>
+        {% endif %}
+    </div>
+
+    {% if not document %}
+    <div class="no-results">
+        <div class="icon">&#128269;</div>
+        <p>Enter a document ID in the URL to see AI insights.<br>
+        Example: <a href="{% url 'rag_chat:nudge_view' 5 %}">/rag_chat/nudge/5/</a></p>
+    </div>
+    {% else %}
+    <div id="nudge-results">
+        <div class="loading-state">
+            <div class="loading-spinner"></div>
+            <p>Finding related documents...</p>
+        </div>
+    </div>
+    {% endif %}
+</div>
+
+{% if document %}
+<script>
+(function() {
+    var docId = {{ document.pk }};
+    var ragUrl = '{{ rag_url }}';
+
+    fetch(ragUrl + '/api/nudge/' + docId)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var container = document.getElementById('nudge-results');
+            if (!data.related || data.related.length === 0) {
+                container.innerHTML = '<div class="no-results"><div class="icon">&#128196;</div><p>No similar documents found. Upload more documents to enable cross-document insights.</p></div>';
+                return;
+            }
+
+            var html = '<h4 style="font-size:14px;color:#888;margin-bottom:12px;">Related Documents (' + data.related.length + ' found)</h4><div class="related-grid">';
+            data.related.forEach(function(doc) {
+                var simClass = doc.similarity >= 0.6 ? 'sim-high' : doc.similarity >= 0.35 ? 'sim-medium' : 'sim-low';
+                var simPct = Math.round(doc.similarity * 100);
+
+                html += '<div class="related-card">';
+                html += '<div class="related-card-header">';
+                html += '<span class="related-card-title"><a href="/documents/documents/' + doc.doc_id + '/preview/">' + escHtml(doc.doc_name) + '</a></span>';
+                html += '<span class="similarity-badge ' + simClass + '">' + simPct + '% match</span>';
+                html += '</div>';
+                html += '<div class="related-card-type">Type: ' + escHtml(doc.doc_type || 'Unknown') + '</div>';
+
+                if (doc.matching_sections && doc.matching_sections.length > 0) {
+                    html += '<div class="matching-sections"><h5>Matching Sections</h5>';
+                    doc.matching_sections.forEach(function(m) {
+                        html += '<div class="match-item">';
+                        html += '<span class="match-score">' + Math.round(m.similarity * 100) + '%</span>';
+                        html += '<div class="match-section">' + escHtml(m.section) + '</div>';
+                        html += '<div class="match-page">Page ' + m.page + '</div>';
+                        html += '<div class="match-preview">' + escHtml(m.preview) + '</div>';
+                        html += '</div>';
+                    });
+                    html += '</div>';
+                }
+
+                html += '<div style="margin-top:10px;display:flex;gap:8px;">';
+                html += '<a href="/documents/documents/' + doc.doc_id + '/preview/" style="font-size:12px;color:#0d6efd;">Open Document</a>';
+                html += '<a href="/rag_chat/nudge/' + doc.doc_id + '/" style="font-size:12px;color:#6c757d;">View Its Insights</a>';
+                html += '<a href="/rag_chat/chunks/' + doc.doc_id + '/" style="font-size:12px;color:#6c757d;">View Chunks</a>';
+                html += '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+            container.innerHTML = html;
+        })
+        .catch(function(err) {
+            document.getElementById('nudge-results').innerHTML = '<div class="no-results"><div class="icon">&#9888;</div><p>Error loading insights: ' + err.message + '</p></div>';
+        });
+
+    function escHtml(t) { var d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+})();
+</script>
+{% endif %}
+{% endblock %}

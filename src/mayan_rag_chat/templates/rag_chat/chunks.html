@@ -1,0 +1,139 @@
+{% extends "appearance/base.html" %}
+{% load i18n %}
+
+{% block title %}Chunk Inspector{% endblock %}
+
+{% block content %}
+<style>
+    .chunk-page { max-width: 1280px; margin: 0 auto; }
+    .chunk-nav { display: flex; gap: 12px; margin-bottom: 16px; }
+    .chunk-nav a {
+        padding: 8px 20px; border-radius: 6px; text-decoration: none; color: #fff;
+        font-size: 13px; font-weight: 600;
+    }
+    .chunk-card {
+        background: #fff; border: 1px solid #d9e1ea; border-radius: 10px;
+        padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .chunk-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px;
+        margin-top: 12px;
+    }
+    .chunk-stat { background: #f8fafc; border-radius: 8px; padding: 12px; }
+    .chunk-stat .label { font-size: 11px; text-transform: uppercase; color: #64748b; }
+    .chunk-stat .value { font-size: 20px; font-weight: 700; color: #1e293b; margin-top: 4px; }
+    .chunk-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .chunk-form input {
+        width: 160px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px;
+    }
+    .chunk-form button {
+        padding: 10px 16px; border: 0; border-radius: 8px; background: #0d6efd; color: #fff; cursor: pointer;
+    }
+    .chunk-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .chunk-column-title { margin: 0 0 12px; color: #1e293b; }
+    .chunk-item {
+        border: 1px solid #e2e8f0; border-left: 4px solid #0d6efd; border-radius: 8px;
+        padding: 12px; background: #fff; margin-bottom: 12px;
+    }
+    .chunk-item.parent { border-left-color: #16a34a; }
+    .chunk-meta { font-size: 12px; color: #64748b; margin-bottom: 8px; }
+    .chunk-text {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px; line-height: 1.6; white-space: pre-wrap; color: #1e293b;
+        max-height: 280px; overflow: auto; background: #f8fafc; padding: 10px; border-radius: 6px;
+    }
+    .chunk-error {
+        padding: 12px 14px; background: #fff1f2; border: 1px solid #fecdd3; color: #9f1239;
+        border-radius: 8px; margin-bottom: 16px;
+    }
+    @media (max-width: 960px) {
+        .chunk-columns { grid-template-columns: 1fr; }
+    }
+</style>
+
+<div class="chunk-page">
+    <div class="chunk-nav">
+        <a href="/rag_chat/chat/" style="background:#0d6efd;">💬 Chat</a>
+        <a href="/rag_chat/index/" style="background:#28a745;">📄 Index Documents</a>
+        <a href="/documents/" style="background:#6c757d;">📁 All Documents</a>
+    </div>
+
+    <div class="chunk-card">
+        <h2 style="margin-top:0;">Chunk Inspector</h2>
+        <p style="margin-bottom:16px;color:#475569;">
+            Enter a Mayan document ID to inspect the stored parent and child chunks used by the RAG pipeline.
+        </p>
+        <form class="chunk-form" method="get" action="/rag_chat/chunks/">
+            <label for="document_id"><strong>Document ID</strong></label>
+            <input id="document_id" name="document_id" type="number" min="1" value="{{ document_id|default:'' }}" placeholder="e.g. 4">
+            <button type="submit">Load chunks</button>
+            {% if document %}
+            <a href="/rag_chat/chunks/{{ document.pk }}/" style="color:#0d6efd;text-decoration:none;font-weight:600;">Direct link for this document</a>
+            {% endif %}
+        </form>
+    </div>
+
+    {% if error %}
+    <div class="chunk-error">{{ error }}</div>
+    {% endif %}
+
+    {% if summary %}
+    <div class="chunk-card">
+        <h3 style="margin-top:0;">{{ document.label }}</h3>
+        <div style="font-size:13px;color:#64748b;">
+            Document ID {{ document_id }} · Key {{ summary.document_key }} · Pages {{ summary.first_page }} to {{ summary.last_page }}
+        </div>
+        <div class="chunk-grid">
+            <div class="chunk-stat">
+                <div class="label">Total chunks</div>
+                <div class="value">{{ summary.total_chunks }}</div>
+            </div>
+            <div class="chunk-stat">
+                <div class="label">Parent chunks</div>
+                <div class="value">{{ summary.parent_chunks }}</div>
+            </div>
+            <div class="chunk-stat">
+                <div class="label">Child chunks</div>
+                <div class="value">{{ summary.child_chunks }}</div>
+            </div>
+            <div class="chunk-stat">
+                <div class="label">Document name</div>
+                <div class="value" style="font-size:14px;">{{ summary.document_name }}</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="chunk-columns">
+        <div class="chunk-card">
+            <h3 class="chunk-column-title">Parent Chunks</h3>
+            {% for chunk in parents %}
+            <div class="chunk-item parent">
+                <div class="chunk-meta">
+                    Page {{ chunk.page_number }} · Lines {{ chunk.start_line }}-{{ chunk.end_line }} · Parent ID {{ chunk.parent_id }}
+                    {% if chunk.section %} · Section {{ chunk.section }}{% endif %}
+                </div>
+                <div class="chunk-text">{{ chunk.content }}</div>
+            </div>
+            {% empty %}
+            <p>No parent chunks stored for this document.</p>
+            {% endfor %}
+        </div>
+
+        <div class="chunk-card">
+            <h3 class="chunk-column-title">Child Chunks</h3>
+            {% for chunk in children %}
+            <div class="chunk-item">
+                <div class="chunk-meta">
+                    Page {{ chunk.page_number }} · Lines {{ chunk.start_line }}-{{ chunk.end_line }} · Parent ID {{ chunk.parent_id }}
+                    {% if chunk.section %} · Section {{ chunk.section }}{% endif %}
+                </div>
+                <div class="chunk-text">{{ chunk.content }}</div>
+            </div>
+            {% empty %}
+            <p>No child chunks stored for this document.</p>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
