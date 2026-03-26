@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Excel RAG Chat — EDMS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; height: 100vh; display: flex; flex-direction: column; }
+
+  /* Header */
+  .header { background: #1e293b; border-bottom: 1px solid #334155; padding: 12px 24px; display: flex; align-items: center; gap: 12px; }
+  .header h1 { font-size: 18px; color: #f1f5f9; }
+  .header .badge { background: #059669; color: white; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+  .header .doc-select { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .header select, .header input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 6px 12px; border-radius: 6px; font-size: 13px; }
+  .header input[type="file"] { font-size: 12px; }
+
+  /* Main layout */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* Chat panel */
+  .chat-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #1e293b; }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+  .chat-input-area { padding: 16px; background: #1e293b; border-top: 1px solid #334155; display: flex; gap: 8px; }
+  .chat-input-area input { flex: 1; background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 12px 16px; border-radius: 8px; font-size: 14px; outline: none; }
+  .chat-input-area input:focus { border-color: #3b82f6; }
+  .chat-input-area button { background: #3b82f6; color: white; border: none; padding: 12px 20px; border-radius: 8px; font-size: 14px; cursor: pointer; font-weight: 600; }
+  .chat-input-area button:hover { background: #2563eb; }
+  .chat-input-area button:disabled { background: #334155; cursor: not-allowed; }
+
+  /* Messages */
+  .msg { max-width: 85%; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.6; }
+  .msg.user { background: #1e40af; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .msg.bot { background: #1e293b; border: 1px solid #334155; align-self: flex-start; border-bottom-left-radius: 4px; }
+  .msg.bot .answer { color: #e2e8f0; }
+  .msg.bot .sql-badge { display: inline-block; background: #059669; color: white; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-bottom: 6px; }
+  .msg.bot .semantic-badge { display: inline-block; background: #7c3aed; color: white; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-bottom: 6px; }
+  .msg pre { background: #0f172a; padding: 8px 12px; border-radius: 6px; margin-top: 8px; font-size: 12px; overflow-x: auto; color: #94a3b8; }
+  .msg table { border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+  .msg th, .msg td { border: 1px solid #334155; padding: 4px 10px; text-align: left; }
+  .msg th { background: #1e293b; color: #94a3b8; font-size: 11px; }
+
+  /* Engine panel */
+  .engine-panel { width: 420px; background: #0c1222; display: flex; flex-direction: column; overflow: hidden; }
+  .engine-header { padding: 12px 16px; background: #1e293b; border-bottom: 1px solid #334155; font-size: 13px; font-weight: 600; color: #94a3b8; display: flex; align-items: center; gap: 8px; }
+  .engine-header .dot { width: 8px; height: 8px; border-radius: 50%; background: #334155; }
+  .engine-header .dot.active { background: #22c55e; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .engine-steps { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+
+  /* Steps */
+  .step { background: #1e293b; border: 1px solid #334155; border-radius: 8px; overflow: hidden; transition: all 0.3s; }
+  .step.active { border-color: #3b82f6; box-shadow: 0 0 12px rgba(59,130,246,0.15); }
+  .step.done { border-color: #059669; }
+  .step.error { border-color: #ef4444; }
+  .step-header { padding: 10px 12px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .step-icon { width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; flex-shrink: 0; }
+  .step-icon.pending { background: #334155; color: #64748b; }
+  .step-icon.active { background: #1e40af; color: #93c5fd; }
+  .step-icon.done { background: #065f46; color: #6ee7b7; }
+  .step-title { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+  .step-subtitle { font-size: 11px; color: #64748b; margin-left: auto; }
+  .step-body { padding: 0 12px 10px 44px; font-size: 11px; color: #94a3b8; font-family: 'SF Mono', Monaco, monospace; white-space: pre-wrap; max-height: 200px; overflow-y: auto; display: none; }
+  .step.active .step-body, .step.done .step-body { display: block; }
+
+  /* Upload area */
+  .upload-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+  .upload-overlay.show { display: flex; }
+  .upload-box { background: #1e293b; border: 2px dashed #334155; border-radius: 16px; padding: 40px; text-align: center; max-width: 500px; }
+  .upload-box h2 { color: #e2e8f0; margin-bottom: 8px; }
+  .upload-box p { color: #64748b; margin-bottom: 20px; }
+  .upload-box input[type="file"] { display: none; }
+  .upload-box label { background: #3b82f6; color: white; padding: 10px 24px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+  .upload-progress { margin-top: 16px; display: none; }
+  .upload-progress .bar { height: 4px; background: #334155; border-radius: 2px; overflow: hidden; }
+  .upload-progress .bar-fill { height: 100%; background: #3b82f6; width: 0%; transition: width 0.3s; }
+  .upload-progress .status { font-size: 12px; color: #94a3b8; margin-top: 8px; }
+
+  /* Welcome */
+  .welcome { text-align: center; padding: 60px 20px; color: #475569; }
+  .welcome h2 { color: #64748b; font-size: 20px; margin-bottom: 8px; }
+  .welcome p { font-size: 14px; }
+
+  .loading-dots::after { content: ''; animation: dots 1.5s infinite; }
+  @keyframes dots { 0% { content: '.'; } 33% { content: '..'; } 66% { content: '...'; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Excel RAG Chat</h1>
+  <span class="badge">EDMS Pipeline</span>
+  <div class="doc-select">
+    <span style="color:#64748b;font-size:12px;">Document:</span>
+    <select id="docSelect">
+      <option value="">-- Upload or select --</option>
+    </select>
+    <button onclick="document.getElementById('fileInput').click()" style="background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;">Upload Excel</button>
+    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="uploadFile(this)">
+  </div>
+</div>
+
+<div class="main">
+  <!-- Chat Panel -->
+  <div class="chat-panel">
+    <div class="chat-messages" id="chatMessages">
+      <div class="welcome">
+        <h2>Ask questions about your Excel data</h2>
+        <p>Upload an Excel file, then ask questions like:<br>
+        "What is the total revenue?" or "Which department has the highest budget?"</p>
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <input type="text" id="chatInput" placeholder="Ask a question about your data..." onkeydown="if(event.key==='Enter')sendMessage()">
+      <button onclick="sendMessage()" id="sendBtn">Send</button>
+    </div>
+  </div>
+
+  <!-- Engine Panel -->
+  <div class="engine-panel">
+    <div class="engine-header">
+      <div class="dot" id="engineDot"></div>
+      Backend Engine
+    </div>
+    <div class="engine-steps" id="engineSteps">
+      <div style="padding:20px;text-align:center;color:#475569;font-size:13px;">
+        Waiting for a query...
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let currentDocKey = '';
+let currentDocName = '';
+
+// ── Upload ──
+async function uploadFile(input) {
+  const file = input.files[0];
+  if (!file) return;
+
+  addMessage('user', `Uploading: ${file.name}`);
+  setEngineSteps([
+    { id: 'upload', title: 'Uploading file', status: 'active', body: file.name },
+    { id: 'parse', title: 'Stage 1: Gemini Extraction', status: 'pending', body: '' },
+    { id: 'enrich', title: 'Stage 2: Schema + Enrichment', status: 'pending', body: '' },
+    { id: 'chunk', title: 'Chunking + Embedding', status: 'pending', body: '' },
+    { id: 'store', title: 'Stage 3: SQLite + pgvector', status: 'pending', body: '' },
+  ]);
+
+  const form = new FormData();
+  form.append('file', file);
+
+  try {
+    updateStep('upload', 'done', `Uploaded ${file.name}`);
+    updateStep('parse', 'active', 'Sending to Gemini...');
+
+    const resp = await fetch(`${API}/api/upload`, { method: 'POST', body: form });
+    const data = await resp.json();
+
+    if (data.doc_type === 'spreadsheet' || data.file_type === 'spreadsheet') {
+      currentDocKey = data.document_key || file.name.replace(/\./g, '_');
+      currentDocName = file.name;
+
+      updateStep('parse', 'done', `Parsed: ${Object.keys(data.sheets || {}).length || '?'} sheets`);
+      updateStep('enrich', 'done', `Schema generated, ${data.total_chunks || '?'} chunks`);
+      updateStep('chunk', 'done', `${data.total_chunks || '?'} chunks embedded`);
+      updateStep('store', 'done', data.sql_queryable ? 'SQLite + pgvector ready' : 'pgvector ready');
+
+      // Add to dropdown
+      const opt = document.createElement('option');
+      opt.value = currentDocKey;
+      opt.textContent = file.name;
+      opt.selected = true;
+      document.getElementById('docSelect').appendChild(opt);
+
+      addMessage('bot', `Indexed <b>${file.name}</b><br>` +
+        `Sheets: ${JSON.stringify(Object.keys(data.sheets || {}))}<br>` +
+        `Chunks: ${data.total_chunks}<br>` +
+        `SQL Queryable: ${data.sql_queryable ? 'Yes' : 'No'}<br><br>` +
+        `Ask me anything about this data!`, 'semantic');
+    } else {
+      addMessage('bot', `Indexed <b>${file.name}</b> as ${data.doc_type}. ${data.total_chunks} chunks.`);
+    }
+  } catch (e) {
+    updateStep('parse', 'error', `Error: ${e.message}`);
+    addMessage('bot', `Upload failed: ${e.message}`);
+  }
+
+  input.value = '';
+}
+
+// ── Chat ──
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const q = input.value.trim();
+  if (!q) return;
+
+  input.value = '';
+  addMessage('user', q);
+
+  const docKey = document.getElementById('docSelect').value || currentDocKey;
+  if (!docKey) {
+    addMessage('bot', 'Please upload an Excel file first.');
+    return;
+  }
+
+  document.getElementById('sendBtn').disabled = true;
+
+  // Show engine steps
+  setEngineSteps([
+    { id: 'classify', title: 'Query Classification', status: 'active', body: 'Analyzing question type...' },
+    { id: 'schema', title: 'Schema Lookup', status: 'pending', body: '' },
+    { id: 'sql', title: 'SQL Generation', status: 'pending', body: '' },
+    { id: 'exec', title: 'SQL Execution', status: 'pending', body: '' },
+    { id: 'synth', title: 'Answer Synthesis', status: 'pending', body: '' },
+  ]);
+
+  try {
+    const resp = await fetch(`${API}/api/excel/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q, document_key: docKey }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      addMessage('bot', `Error: ${data.error}`);
+      document.getElementById('sendBtn').disabled = false;
+      return;
+    }
+
+    // Update engine with trace
+    const trace = data.trace || {};
+
+    updateStep('classify', 'done', `Type: ${data.query_type || 'sql'}`);
+    updateStep('schema', 'done', trace.schema ? trace.schema.substring(0, 300) + '...' : 'Schema loaded');
+    updateStep('sql', trace.sql ? 'done' : 'pending', trace.sql || 'N/A');
+    updateStep('exec', trace.results ? 'done' : 'pending',
+      trace.results ? `${trace.results.length} rows returned` : 'N/A');
+    updateStep('synth', 'done', `Model: ${trace.model || 'N/A'} | Attempts: ${trace.attempts || 1}`);
+
+    // Build answer message
+    let html = '';
+    if (data.query_type === 'sql') {
+      html += '<span class="sql-badge">SQL Query</span><br>';
+      if (trace.sql) html += `<pre>${trace.sql}</pre>`;
+      if (trace.results && trace.results.length > 0) {
+        html += buildTable(trace.results);
+      }
+      html += `<div class="answer" style="margin-top:8px">${data.answer || 'No answer generated.'}</div>`;
+    } else {
+      html += '<span class="semantic-badge">Semantic Search</span><br>';
+      html += `<div class="answer">${data.answer || JSON.stringify(data.results || [], null, 2)}</div>`;
+    }
+
+    addMessage('bot', html, data.query_type);
+  } catch (e) {
+    addMessage('bot', `Error: ${e.message}`);
+  }
+
+  document.getElementById('sendBtn').disabled = false;
+}
+
+function buildTable(rows) {
+  if (!rows || rows.length === 0) return '';
+  const keys = Object.keys(rows[0]);
+  let html = '<table><tr>';
+  keys.forEach(k => html += `<th>${k}</th>`);
+  html += '</tr>';
+  rows.slice(0, 10).forEach(row => {
+    html += '<tr>';
+    keys.forEach(k => html += `<td>${row[k] ?? ''}</td>`);
+    html += '</tr>';
+  });
+  if (rows.length > 10) html += `<tr><td colspan="${keys.length}" style="color:#64748b">... ${rows.length - 10} more rows</td></tr>`;
+  html += '</table>';
+  return html;
+}
+
+// ── UI Helpers ──
+function addMessage(type, html) {
+  const container = document.getElementById('chatMessages');
+  // Remove welcome message
+  const welcome = container.querySelector('.welcome');
+  if (welcome) welcome.remove();
+
+  const div = document.createElement('div');
+  div.className = `msg ${type}`;
+  div.innerHTML = html;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function setEngineSteps(steps) {
+  const container = document.getElementById('engineSteps');
+  container.innerHTML = '';
+  document.getElementById('engineDot').className = 'dot active';
+
+  steps.forEach(s => {
+    const div = document.createElement('div');
+    div.className = `step ${s.status}`;
+    div.id = `step-${s.id}`;
+    div.innerHTML = `
+      <div class="step-header" onclick="this.parentElement.classList.toggle('expanded')">
+        <div class="step-icon ${s.status}">${s.status === 'done' ? '&#10003;' : s.status === 'active' ? '&#9679;' : '&#9675;'}</div>
+        <span class="step-title">${s.title}</span>
+        <span class="step-subtitle">${s.status}</span>
+      </div>
+      <div class="step-body">${s.body}</div>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function updateStep(id, status, body) {
+  const step = document.getElementById(`step-${id}`);
+  if (!step) return;
+  step.className = `step ${status}`;
+  const icon = step.querySelector('.step-icon');
+  icon.className = `step-icon ${status}`;
+  icon.innerHTML = status === 'done' ? '&#10003;' : status === 'active' ? '&#9679;' : status === 'error' ? '&#10007;' : '&#9675;';
+  const subtitle = step.querySelector('.step-subtitle');
+  subtitle.textContent = status;
+  if (body) {
+    const bodyEl = step.querySelector('.step-body');
+    bodyEl.textContent = body;
+  }
+
+  // Check if all done
+  const allDone = document.querySelectorAll('.step.done').length === document.querySelectorAll('.step').length;
+  if (allDone) document.getElementById('engineDot').className = 'dot';
+}
+</script>
+</body>
+</html>

@@ -82,6 +82,9 @@ class SearchEngine:
         """Index chunks into PostgreSQL + pgvector with document-scoped replacement."""
         if not chunks:
             return
+        if not self.store._pg_available:
+            print(f"[SearchEngine] Skipping index — PostgreSQL not available")
+            return
 
         self._load_model()
         document_name = document_name or self._infer_document_name(chunks)

@@ -12,6 +12,31 @@ import psycopg
 from psycopg.rows import dict_row
 
 
+def _sanitize_lines(lines: list) -> list:
+    """Strip non-serializable objects (DataFrames) from lines before JSON dump."""
+    clean = []
+    for item in lines:
+        if isinstance(item, dict) and "__meta__" in item:
+            continue  # skip metadata entries with DataFrames
+        clean.append(item)
+    return clean
+
+
+def _sanitize_meta(meta: dict) -> dict:
+    """Strip non-serializable values from chunk metadata."""
+    clean = {}
+    for k, v in meta.items():
+        if k == "schema_description" and isinstance(v, str) and len(v) > 1000:
+            clean[k] = v[:1000] + "..."  # truncate large schemas
+        else:
+            try:
+                json.dumps(v)
+                clean[k] = v
+            except (TypeError, ValueError):
+                clean[k] = str(v)  # convert non-serializable to string
+    return clean
+
+
 class PostgresVectorStore:
     """Stores RAG chunks in PostgreSQL using the pgvector extension."""
 
@@ -22,7 +47,12 @@ class PostgresVectorStore:
         self.user = os.environ.get("RAG_PGUSER", os.environ.get("POSTGRES_USER", "mayan"))
         self.password = os.environ.get("RAG_PGPASSWORD", os.environ.get("POSTGRES_PASSWORD", "mayan"))
         self.schema = os.environ.get("RAG_PG_SCHEMA", "rag")
-        self._ensure_schema()
+        self._pg_available = False
+        try:
+            self._ensure_schema()
+            self._pg_available = True
+        except Exception as e:
+            print(f"[PostgresVectorStore] PostgreSQL not available, running in local-only mode: {e}")
 
     def _connect(self):
         return psycopg.connect(
@@ -146,6 +176,21 @@ class PostgresVectorStore:
                 """
             )
 
+            # Excel SQLite database registry (Stage 3 — Hybrid Indexing)
+            conn.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.schema}.excel_databases (
+                    document_key text PRIMARY KEY,
+                    document_name text NOT NULL,
+                    db_path text NOT NULL,
+                    schema_json jsonb NOT NULL,
+                    sheet_names jsonb NOT NULL,
+                    total_rows integer DEFAULT 0,
+                    created_at timestamptz DEFAULT now()
+                )
+                """
+            )
+
     def replace_document(self, document_key: str, chunks: list, embeddings: dict[int, list[float]]):
         with self._connect() as conn:
             with conn.transaction():
@@ -184,8 +229,8 @@ class PostgresVectorStore:
                             meta.get("end_line", 0),
                             chunk.text,
                             enriched,
-                            json.dumps(getattr(chunk, "lines", []) or []),
-                            json.dumps(meta),
+                            json.dumps(_sanitize_lines(getattr(chunk, "lines", []) or [])),
+                            json.dumps(_sanitize_meta(meta)),
                             _to_vector_literal(embedding) if embedding else None,
                         ),
                     )

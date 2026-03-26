@@ -144,6 +144,12 @@ class ContextEnricher:
         section: str,
         page: int,
     ) -> str:
+        # Spreadsheet-specific context prefix
+        if doc_type == "spreadsheet":
+            return ContextEnricher._tabular_context(
+                doc_title, section, page, doc_summary
+            )
+
         source = f"From '{doc_title}'"
         if doc_type and doc_type not in ("general", "general_with_images"):
             source += f" ({doc_type.replace('_', ' ')})"
@@ -157,6 +163,25 @@ class ContextEnricher:
 
         if location:
             return f"{source}, {location}. {doc_summary}"
+        return f"{source}. {doc_summary}"
+
+    @staticmethod
+    def _tabular_context(
+        doc_title: str,
+        section: str,
+        page: int,
+        doc_summary: str,
+    ) -> str:
+        """Context prefix for spreadsheet chunks.
+
+        Tells the embedding model: this text comes from a spreadsheet,
+        here's the sheet name and what kind of data it contains.
+        """
+        source = f"From spreadsheet '{doc_title}'"
+        if section and section not in ("[body]", "Columns"):
+            source += f", sheet '{section}'"
+        if page:
+            source += f" (sheet {page})"
         return f"{source}. {doc_summary}"
 
     # ------------------------------------------------------------------

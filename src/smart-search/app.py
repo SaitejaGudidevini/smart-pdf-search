@@ -10,13 +10,18 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-load_dotenv()
+load_dotenv(override=True)
 
 from pdf_processor import PDFProcessor
 from search_engine import SearchEngine
 from chunking_pipeline import ChunkingPipeline
 from mayan_bridge import MayanBridge
 from storage_pg import make_document_key
+from excel_parser import ExcelParser, is_excel_file
+from excel_enricher import ExcelEnricher
+from excel_storage import ExcelStorageManager, classify_query
+from excel_agent import ExcelSQLAgent
+from excel_routes import router as excel_router
 
 # Structure extraction: pymupdf4llm (best) → Docling (ML-based) → PyMuPDF (basic fallback)
 _structure_parser = None
@@ -47,6 +52,10 @@ pdf_processor = PDFProcessor(cache_dir="cache")  # kept for rendering + page ext
 search_engine = SearchEngine()
 chunking_pipeline = ChunkingPipeline()
 mayan = MayanBridge()
+excel_parser = ExcelParser()
+excel_enricher = ExcelEnricher()
+excel_storage = ExcelStorageManager()
+excel_agent = ExcelSQLAgent()
 
 
 def extract_structure(pdf_path: str):
@@ -65,6 +74,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 current_pdf: dict = {"path": None, "name": None, "page_count": 0}
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(excel_router)  # /api/excel/upload, /api/excel/status, /api/excel/retry
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -73,37 +83,100 @@ async def index():
 
 
 @app.post("/api/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    """Upload a PDF and index it for searching."""
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF files are supported")
+async def upload_document(file: UploadFile = File(...)):
+    """Upload a PDF or Excel file and index it for searching."""
+    filename = file.filename.lower()
 
-    pdf_path = UPLOAD_DIR / file.filename
+    if not (filename.endswith(".pdf") or is_excel_file(filename)):
+        raise HTTPException(400, "Supported formats: .pdf, .xlsx, .xls, .csv")
+
+    file_path = UPLOAD_DIR / file.filename
     content = await file.read()
-    pdf_path.write_bytes(content)
+    file_path.write_bytes(content)
 
-    # Extract pages (for frontend page viewer)
-    pages = pdf_processor.extract_pages(str(pdf_path))
-    page_count = pdf_processor.get_page_count(str(pdf_path))
+    if is_excel_file(filename):
+        return _index_excel(str(file_path), file.filename)
+    else:
+        return _index_pdf(str(file_path), file.filename)
 
-    # Structure-aware extraction + chunking pipeline
-    structure = extract_structure(str(pdf_path))
+
+def _index_pdf(pdf_path: str, filename: str) -> dict:
+    """Index a PDF file through the existing pipeline."""
+    pages = pdf_processor.extract_pages(pdf_path)
+    page_count = pdf_processor.get_page_count(pdf_path)
+
+    structure = extract_structure(pdf_path)
     doc_type = structure.doc_type
-    document_key = make_document_key(file.filename)
-    chunks = chunking_pipeline.chunk_document(structure, file.filename, document_key=document_key)
-    search_engine.index(chunks, pages, document_name=file.filename)
+    document_key = make_document_key(filename)
+    chunks = chunking_pipeline.chunk_document(structure, filename, document_key=document_key)
+    search_engine.index(chunks, pages, document_name=filename)
 
-    current_pdf["path"] = str(pdf_path)
-    current_pdf["name"] = file.filename
+    current_pdf["path"] = pdf_path
+    current_pdf["name"] = filename
     current_pdf["page_count"] = page_count
 
     return {
-        "filename": file.filename,
+        "filename": filename,
         "page_count": page_count,
         "indexed_pages": len(pages),
         "total_lines": sum(len(p.lines) for p in pages),
         "doc_type": doc_type,
         "total_chunks": len(chunks),
+    }
+
+
+def _index_excel(file_path: str, filename: str, mayan_doc_id: int | None = None) -> dict:
+    """Index an Excel file: parse → enrich → chunk → embed → store."""
+    # Stage 1: Adaptive parsing
+    dataframes, formulas = excel_parser.parse(file_path)
+
+    # Stage 2: Structural enrichment — semantic rows for embedding
+    all_semantic_rows = []
+    for sheet_name, df in dataframes.items():
+        sheet_formulas = formulas.get(sheet_name, [])
+        rows = excel_enricher.generate_semantic_rows(df, sheet_name, sheet_formulas)
+        all_semantic_rows.extend(rows)
+
+    # Generate schema description (stored as metadata for future SQL agent)
+    schema_description = excel_enricher.generate_all_schemas(dataframes)
+
+    # Convert to DocumentStructure so existing chunking pipeline works
+    structure = excel_parser.extract_structure(file_path)
+    document_key = make_document_key(filename, mayan_doc_id)
+    chunks = chunking_pipeline.chunk_document(structure, filename, document_key=document_key)
+
+    # Enrich all chunks with Excel-specific metadata
+    for chunk in chunks:
+        chunk.metadata["file_type"] = "spreadsheet"
+        chunk.metadata["schema_description"] = schema_description
+        chunk.metadata["sheet_names"] = list(dataframes.keys())
+        chunk.metadata["total_rows"] = sum(len(df) for df in dataframes.values())
+        if mayan_doc_id:
+            chunk.metadata["mayan_doc_id"] = mayan_doc_id
+
+    # Index into pgvector (same as PDF path)
+    search_engine.index(chunks, pages=None, document_id=mayan_doc_id, document_name=filename)
+
+    # Stage 3: Store DataFrames in SQLite for SQL queries
+    has_sql = False
+    if dataframes:
+        try:
+            excel_storage.store_excel(document_key, filename, dataframes)
+            has_sql = True
+        except Exception as e:
+            print(f"[Excel] SQLite storage failed (non-fatal): {e}")
+
+    return {
+        "filename": filename,
+        "document_key": document_key,
+        "file_type": "spreadsheet",
+        "sheets": {name: {"rows": len(df), "columns": len(df.columns)} for name, df in dataframes.items()},
+        "total_rows": sum(len(df) for df in dataframes.values()),
+        "total_semantic_rows": len(all_semantic_rows),
+        "total_chunks": len(chunks),
+        "doc_type": "spreadsheet",
+        "schema_description": schema_description,
+        "sql_queryable": has_sql,
     }
 
 
@@ -163,7 +236,7 @@ async def search(body: dict):
 
     # Build RAG context: for each matched child, extract a context window
     # from its parent centered around the child's location.
-    RAG_CONTEXT_BUDGET = 4000  # chars per context block sent to LLM
+    RAG_CONTEXT_BUDGET = 8000  # chars per context block — larger for financial tables
     rag_context = []
     seen_parents = set()
     for result in results[:3]:
@@ -194,7 +267,7 @@ async def search(body: dict):
                 "page_number": result.page_number,
                 "text": context_text,
             })
-            if len(rag_context) >= 3:
+            if len(rag_context) >= 5:
                 break
         if len(rag_context) >= 3:
             break
@@ -307,14 +380,17 @@ async def _generate_rag_answer(query: str, rag_context: list[dict]) -> dict:
         return None
 
     system_prompt = (
-        "You are a document analysis assistant. Answer questions based ONLY on the provided document excerpts. "
+        "You are a financial data analyst. Answer questions using the provided document excerpts. "
         "Rules:\n"
-        "1. Use ONLY information from the provided excerpts. Do NOT use your own knowledge.\n"
+        "1. Use information from the provided excerpts as your primary source.\n"
         "2. Cite sources as [Page X] for every claim.\n"
-        "3. If the excerpts don't contain enough information, say: "
-        "'The document does not contain enough information to answer this question.'\n"
-        "4. Be concise but thorough. Quote key phrases directly when possible.\n"
-        "5. If the answer spans multiple pages, cite each page separately."
+        "3. COMPUTE, CALCULATE, and REASON when asked. If the user asks for totals, "
+        "differences, percentages, or comparisons — do the math using the numbers in the excerpts.\n"
+        "4. Show your calculations step by step when performing math.\n"
+        "5. Present numerical answers clearly with proper formatting ($, commas, %).\n"
+        "6. If data is available across multiple pages, combine it to give a complete answer.\n"
+        "7. If the excerpts truly don't contain the needed data, say so — but try to answer "
+        "with what's available before giving up."
     )
 
     user_prompt = f"DOCUMENT PAGES:{sources_text}\n\nQUESTION: {query}"
@@ -460,6 +536,15 @@ async def mayan_sync_document(doc_id: int):
     try:
         # 1. Download from Mayan
         mayan_doc = await mayan.sync_document(doc_id)
+
+        # Route: Excel files get their own pipeline
+        if is_excel_file(mayan_doc.file_path):
+            result = _index_excel(mayan_doc.file_path, mayan_doc.label, mayan_doc_id=doc_id)
+            await mayan.classify_document(doc_id=doc_id, rag_doc_type="spreadsheet", tags=["AI: Spreadsheet"])
+            result["mayan_doc_id"] = doc_id
+            result["mayan_metadata"] = mayan_doc.metadata
+            return result
+
         ocr_pages = await mayan.get_ocr_text(doc_id)
 
         # 2. Extract pages (for frontend viewer)
@@ -550,6 +635,7 @@ _MAYAN_TO_RAG = {
     "Financial Report": "financial_report",
     "Medical Document": "medical_document",
     "Presentation": "presentation",
+    "Spreadsheet": "spreadsheet",
 }
 
 
@@ -621,6 +707,22 @@ async def mayan_webhook(body: dict):
                 "existing_status": existing_event["status"] if existing_event else "completed",
             }
 
+        # Route: Excel files get their own pipeline
+        if is_excel_file(mayan_doc.file_path):
+            result = _index_excel(mayan_doc.file_path, mayan_doc.label, mayan_doc_id=doc_id)
+            search_engine.store.complete_webhook_event(event_key)
+            await mayan.classify_document(doc_id=doc_id, rag_doc_type="spreadsheet", tags=["AI: Spreadsheet"])
+            await mayan.set_status_ready(doc_id)
+            return {
+                "status": "indexed",
+                "event": event,
+                "event_key": event_key,
+                "mayan_doc_id": doc_id,
+                "doc_type": "spreadsheet",
+                "total_chunks": result["total_chunks"],
+                "source_profile": {"mode": "excel"},
+            }
+
         ocr_pages = await mayan.get_ocr_text(doc_id)
         pages = pdf_processor.extract_pages(mayan_doc.file_path)
         structure = extract_structure(mayan_doc.file_path)
@@ -684,6 +786,168 @@ async def mayan_webhook(body: dict):
             "event_key": locals().get("event_key"),
             "mayan_doc_id": doc_id,
             "error": str(e),
+        }
+
+
+@app.get("/excel-chat", response_class=HTMLResponse)
+async def excel_chat_ui():
+    """Excel RAG Chat UI with backend engine panel."""
+    return Path("static/excel_chat.html").read_text()
+
+
+@app.post("/api/excel/chat")
+async def excel_chat(body: dict):
+    """Chat endpoint with full pipeline trace for the UI."""
+    question = body.get("question", "").strip()
+    document_key = body.get("document_key", "").strip()
+
+    if not question:
+        return {"error": "question is required"}
+    if not document_key:
+        return {"error": "document_key is required"}
+
+    trace = {}
+
+    # Check SQL database
+    if not excel_storage.has_sql_database(document_key):
+        # Fall back to semantic search
+        query_type = "semantic"
+        trace["note"] = "No SQL database for this document"
+    else:
+        query_type = classify_query(question)
+
+    trace["query_type"] = query_type
+
+    if query_type == "sql":
+        schema = excel_storage.get_schema_description(document_key)
+        trace["schema"] = schema
+
+        result = excel_agent.ask(
+            question=question,
+            schema=schema,
+            execute_fn=lambda sql: excel_storage.execute_sql(document_key, sql),
+        )
+
+        trace["sql"] = result.get("sql")
+        trace["results"] = result.get("results", [])
+        trace["attempts"] = result.get("attempts", 1)
+        trace["model"] = result.get("model", "unknown")
+
+        return {
+            "query_type": "sql",
+            "question": question,
+            "answer": result.get("answer", result.get("error", "No answer")),
+            "trace": trace,
+        }
+    else:
+        # Semantic search — needs PostgreSQL. If not available, try SQL path instead.
+        if not search_engine.store._pg_available:
+            # No PostgreSQL — if we have a SQL database, route all queries through SQL
+            if excel_storage.has_sql_database(document_key):
+                schema = excel_storage.get_schema_description(document_key)
+                trace["schema"] = schema
+                trace["note"] = "PostgreSQL unavailable — routed to SQL agent"
+                result = excel_agent.ask(
+                    question=question,
+                    schema=schema,
+                    execute_fn=lambda sql: excel_storage.execute_sql(document_key, sql),
+                )
+                trace["sql"] = result.get("sql")
+                trace["results"] = result.get("results", [])
+                trace["attempts"] = result.get("attempts", 1)
+                trace["model"] = result.get("model", "unknown")
+                return {
+                    "query_type": "sql",
+                    "question": question,
+                    "answer": result.get("answer", result.get("error", "No answer")),
+                    "trace": trace,
+                }
+            return {
+                "query_type": "semantic",
+                "question": question,
+                "answer": "Semantic search requires PostgreSQL. Please start the Docker stack or ask a data question.",
+                "trace": trace,
+            }
+
+        results = search_engine.search(question, top_k=5)
+        trace["results_count"] = len(results)
+
+        rag_context = []
+        for r in results[:3]:
+            for chunk in r.matched_chunks:
+                rag_context.append({
+                    "document_name": r.document_name,
+                    "page_number": r.page_number,
+                    "text": chunk.text[:500],
+                })
+
+        ai_answer = None
+        if rag_context:
+            ai_answer = await _generate_rag_answer(question, rag_context)
+
+        return {
+            "query_type": "semantic",
+            "question": question,
+            "answer": ai_answer.get("text") if ai_answer else "No relevant results found.",
+            "results": [
+                {"document_name": r.document_name, "page_number": r.page_number, "score": round(r.page_score, 3)}
+                for r in results
+            ],
+            "trace": trace,
+        }
+
+
+@app.post("/api/excel/query")
+async def excel_query(body: dict):
+    """Ask a natural language question about an indexed Excel document.
+
+    Routes to SQL agent for computation queries (sum, average, count)
+    or to standard search for semantic queries.
+    """
+    question = body.get("question", "").strip()
+    document_key = body.get("document_key", "").strip()
+
+    if not question:
+        raise HTTPException(400, "question is required")
+    if not document_key:
+        raise HTTPException(400, "document_key is required")
+
+    # Check if this document has a SQL database
+    if not excel_storage.has_sql_database(document_key):
+        raise HTTPException(404, "No SQL database found for this document. Was it indexed as Excel?")
+
+    # Classify: does this question need SQL or semantic search?
+    query_type = classify_query(question)
+
+    if query_type == "sql":
+        schema = excel_storage.get_schema_description(document_key)
+        result = excel_agent.ask(
+            question=question,
+            schema=schema,
+            execute_fn=lambda sql: excel_storage.execute_sql(document_key, sql),
+        )
+        return {
+            "query_type": "sql",
+            "question": question,
+            "document_key": document_key,
+            **result,
+        }
+    else:
+        # Fall back to standard hybrid search
+        results = search_engine.search(question, top_k=5, document_id=None)
+        return {
+            "query_type": "semantic",
+            "question": question,
+            "document_key": document_key,
+            "total_results": len(results),
+            "results": [
+                {
+                    "document_name": r.document_name,
+                    "page_number": r.page_number,
+                    "score": round(r.page_score, 3),
+                }
+                for r in results
+            ],
         }
 
 
@@ -879,5 +1143,5 @@ async def batch_summarize(body: dict):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 1234))
     uvicorn.run(app, host="0.0.0.0", port=port)
