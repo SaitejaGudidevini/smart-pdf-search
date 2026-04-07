@@ -407,11 +407,11 @@
 </div>
 
 <div class="search-bar">
-    <input type="text" id="search-input" placeholder="Ask a question about your PDF..."
+    <input type="text" id="search-input" placeholder="Ask a question about your document..."
            disabled autocomplete="off">
     <button id="search-btn" onclick="doSearch()" disabled>Search</button>
-    <button class="upload-btn" onclick="document.getElementById('file-input').click()">Upload PDF</button>
-    <input type="file" id="file-input" accept=".pdf" onchange="uploadPDF(this)">
+    <button class="upload-btn" onclick="document.getElementById('file-input').click()">Upload File</button>
+    <input type="file" id="file-input" accept=".pdf,.xlsx,.xls,.csv" onchange="uploadFile(this)">
 </div>
 
 <div class="main">
@@ -419,7 +419,7 @@
     <div class="viewer" id="viewer">
         <div class="empty-state" id="empty-state">
             <div class="icon">&#128196;</div>
-            <p>Upload a PDF to get started</p>
+            <p>Upload a PDF or Excel file to get started</p>
         </div>
         <img id="page-image" style="display:none" alt="PDF Page">
         <div class="page-nav" id="page-nav" style="display:none">
@@ -458,11 +458,12 @@
     };
 
     // --- Upload ---
-    async function uploadPDF(input) {
+    async function uploadFile(input) {
         const file = input.files[0];
         if (!file) return;
 
-        showToast('Processing PDF...');
+        const isExcel = /\.(xlsx|xls|csv)$/i.test(file.name);
+        showToast(isExcel ? 'Processing Excel file...' : 'Processing PDF...');
         const form = new FormData();
         form.append('file', file);
 
@@ -472,16 +473,36 @@
             if (!res.ok) throw new Error(data.detail || 'Upload failed');
 
             state.pdfName = data.filename;
-            state.pageCount = data.page_count;
-            state.currentPage = 1;
-
-            document.getElementById('pdf-name').textContent =
-                `${data.filename} (${data.page_count} pages, ${data.total_lines} lines indexed)`;
             document.getElementById('search-input').disabled = false;
             document.getElementById('search-btn').disabled = false;
 
-            showToast(`Indexed ${data.page_count} pages, ${data.total_lines} lines`);
-            showPage(1);
+            if (isExcel) {
+                // Excel: show summary instead of page viewer
+                state.pageCount = 0;
+                const sheets = Object.keys(data.sheets || {});
+                const totalRows = data.total_rows || 0;
+                const chunks = data.total_chunks || 0;
+                const semanticRows = data.total_semantic_rows || 0;
+                document.getElementById('pdf-name').textContent =
+                    `${data.filename} (${sheets.length} sheets, ${totalRows} rows, ${semanticRows} semantic chunks)`;
+                document.getElementById('empty-state').innerHTML =
+                    '<div class="icon">&#128202;</div>' +
+                    '<p style="color:#a0a0b0">Excel file indexed successfully</p>' +
+                    '<p style="color:#707080;font-size:13px;margin-top:8px">' +
+                    `${sheets.length} sheet(s): ${sheets.join(', ')}<br>` +
+                    `${totalRows} rows → ${semanticRows} semantic chunks<br>` +
+                    (data.sql_queryable ? 'SQL queries enabled' : '') +
+                    '</p>';
+                showToast(`Indexed ${sheets.length} sheets, ${semanticRows} semantic rows`);
+            } else {
+                // PDF: existing behaviour
+                state.pageCount = data.page_count;
+                state.currentPage = 1;
+                document.getElementById('pdf-name').textContent =
+                    `${data.filename} (${data.page_count} pages, ${data.total_lines} lines indexed)`;
+                showToast(`Indexed ${data.page_count} pages, ${data.total_lines} lines`);
+                showPage(1);
+            }
         } catch (e) {
             showToast('Error: ' + e.message);
         }

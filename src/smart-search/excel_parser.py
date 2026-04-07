@@ -10,15 +10,20 @@ pipeline, so ChunkingPipeline, ContextEnricher, and SearchEngine work unchanged.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import re
 from collections import deque
+from dataclasses import asdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 import openpyxl
+from openpyxl.utils import get_column_letter, range_boundaries
 
+from cell_dna import WorkbookDNA, SheetDNA, ColumnDNA, format_value_with_context
 from pdf_processor import DocumentStructure, StructuredPage, StructuredSection
 
 
@@ -45,7 +50,83 @@ EXCEL_EXTENSIONS = {".xlsx", ".xls", ".csv"}
 
 
 def is_excel_file(filename: str) -> bool:
+    """Check by extension only. Use detect_file_type() for content-based detection."""
     return Path(filename).suffix.lower() in EXCEL_EXTENSIONS
+
+
+# Magic bytes for file type detection
+_MAGIC_SIGNATURES = {
+    b"%PDF": "pdf",
+    b"PK\x03\x04": "xlsx",  # ZIP-based (xlsx, docx, etc.)
+    b"\xd0\xcf\x11\xe0": "xls",  # OLE2 (legacy .xls, .doc, .ppt)
+}
+
+
+def detect_file_type(file_path: str) -> str:
+    """Detect actual file type from content magic bytes, ignoring the extension.
+
+    Returns: "pdf", "xlsx", "xls", "csv", or "unknown"
+    """
+    path = Path(file_path)
+    if not path.exists():
+        return "unknown"
+
+    # Read first 8 bytes for magic signature
+    with open(path, "rb") as f:
+        header = f.read(8)
+
+    if not header:
+        return "unknown"
+
+    for magic, ftype in _MAGIC_SIGNATURES.items():
+        if header[:len(magic)] == magic:
+            # ZIP could be .xlsx or .docx — try to verify it's Excel
+            if ftype == "xlsx":
+                try:
+                    import zipfile
+                    with zipfile.ZipFile(path) as zf:
+                        names = zf.namelist()
+                        if any("xl/" in n or "xl\\" in n for n in names):
+                            return "xlsx"
+                        # Not an Excel ZIP (could be .docx, .pptx, etc.)
+                        return "unknown"
+                except Exception:
+                    return "unknown"
+            return ftype
+
+    # No magic match — check if it looks like CSV (text with commas/tabs)
+    ext = path.suffix.lower()
+    if ext == ".csv":
+        return "csv"
+    try:
+        sample = header + open(path, "rb").read(500)
+        if sample.isascii() or sample.decode("utf-8", errors="ignore"):
+            # Could be CSV if extension says so
+            if ext in (".csv", ".tsv", ".txt"):
+                return "csv"
+    except Exception:
+        pass
+
+    return "unknown"
+
+
+def smart_detect(file_path: str) -> str:
+    """Detect whether file is 'excel' or 'pdf', regardless of extension.
+
+    Returns: "excel", "pdf", or "unknown"
+    """
+    ftype = detect_file_type(file_path)
+    if ftype in ("xlsx", "xls", "csv"):
+        return "excel"
+    if ftype == "pdf":
+        return "pdf"
+    # Fallback to extension
+    ext = Path(file_path).suffix.lower()
+    if ext in EXCEL_EXTENSIONS:
+        return "excel"
+    if ext == ".pdf":
+        return "pdf"
+    return "unknown"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -81,12 +162,186 @@ class DetectedRegion:
     metadata: dict = field(default_factory=dict)
 
 
+@dataclass
+class ExtractionCell:
+    """Canonical Stage 1 cell record with provenance and display context."""
+    sheet_name: str
+    address: str
+    row: int
+    col: int
+    raw_value: object
+    display_value: str
+    data_type: str
+    number_format: str
+    formula: str | None = None
+    cached_value: object = None
+    comment: str | None = None
+    hyperlink: str | None = None
+    bold: bool = False
+    italic: bool = False
+    fill_color: str | None = None
+    indent: int = 0
+    horizontal_alignment: str | None = None
+    is_merged: bool = False
+    merged_range: str | None = None
+    hidden_row: bool = False
+    hidden_col: bool = False
+    inferred_role: str | None = None
+    formula_references: list[str] = field(default_factory=list)
+    row_label: str | None = None
+    section_path: list[str] = field(default_factory=list)
+    column_header_path: list[str] = field(default_factory=list)
+    unit_context: str | None = None
+    semantic_text: str | None = None
+    provenance: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class ExtractionRegion:
+    """Meaningful area on a sheet discovered during Stage 1."""
+    region_id: str
+    sheet_name: str
+    region_type: str
+    bbox: tuple[int, int, int, int]
+    title: str | None = None
+    header_rows: list[int] = field(default_factory=list)
+    section_path: list[str] = field(default_factory=list)
+    cells: list[ExtractionCell] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class ExtractionTable:
+    """Normalized table extracted from a workbook region."""
+    table_id: str
+    sheet_name: str
+    region_id: str
+    title: str | None
+    headers: list[str]
+    header_paths: list[list[str]]
+    rows: list[dict[str, object]]
+    row_provenance: list[dict[str, object]]
+    formulas: list[dict[str, object]]
+    dataframe: pd.DataFrame | None = None
+    metadata: dict = field(default_factory=dict)
+
+
+@dataclass
+class WorkbookExtractionResult:
+    """Stage 1 output from openpyxl-first workbook extraction."""
+    file_path: str
+    workbook_name: str
+    sheet_order: list[str]
+    hidden_sheets: list[str]
+    named_ranges: list[dict[str, object]]
+    sheet_metadata: dict[str, dict[str, object]] = field(default_factory=dict)
+    regions: list[ExtractionRegion] = field(default_factory=list)
+    tables: list[ExtractionTable] = field(default_factory=list)
+    cells_by_sheet: dict[str, list[ExtractionCell]] = field(default_factory=dict)
+    workbook_dna: dict[str, SheetDNA] = field(default_factory=dict)
+
+    def to_parse_outputs(
+        self,
+    ) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]], dict[str, SheetDNA]]:
+        """Adapt Stage 1 output to the legacy parser contract."""
+        dataframes: dict[str, pd.DataFrame] = {}
+        formulas: dict[str, list[str]] = {}
+        dna: dict[str, SheetDNA] = {}
+        seen_names: dict[str, int] = {}
+
+        for table in self.tables:
+            if table.dataframe is None or table.dataframe.empty:
+                continue
+
+            clean_name = ExcelParser._clean_name(table.sheet_name)
+            count = seen_names.get(clean_name, 0)
+            seen_names[clean_name] = count + 1
+            if count:
+                clean_name = f"{clean_name}_{count}"
+
+            df = table.dataframe.copy()
+            dataframes[clean_name] = df
+            formulas[clean_name] = [
+                f"{f['cell']}: {f['formula']}"
+                for f in table.formulas
+                if f.get("cell") and f.get("formula")
+            ]
+
+            matched_dna = None
+            if table.sheet_name in self.workbook_dna:
+                matched_dna = self.workbook_dna[table.sheet_name]
+            else:
+                target = ExcelParser._clean_name(table.sheet_name)
+                for sheet_name, sheet_dna in self.workbook_dna.items():
+                    if ExcelParser._clean_name(sheet_name) == target:
+                        matched_dna = sheet_dna
+                        break
+            if matched_dna:
+                dna[clean_name] = matched_dna
+
+        return dataframes, formulas, dna
+
+    def to_dict(
+        self,
+        max_cells_per_sheet: int = 200,
+        max_rows_per_table: int = 25,
+    ) -> dict[str, object]:
+        """Serialize the Stage 1 result to a JSON-friendly dict."""
+        return {
+            "file_path": self.file_path,
+            "workbook_name": self.workbook_name,
+            "sheet_order": self.sheet_order,
+            "hidden_sheets": self.hidden_sheets,
+            "named_ranges": self.named_ranges,
+            "sheet_metadata": self.sheet_metadata,
+            "regions": [
+                {
+                    **asdict(region),
+                    "cells": [asdict(cell) for cell in region.cells[:max_cells_per_sheet]],
+                    "cell_count": len(region.cells),
+                }
+                for region in self.regions
+            ],
+            "tables": [
+                {
+                    "table_id": table.table_id,
+                    "sheet_name": table.sheet_name,
+                    "region_id": table.region_id,
+                    "title": table.title,
+                    "headers": table.headers,
+                    "header_paths": table.header_paths,
+                    "rows": table.rows[:max_rows_per_table],
+                    "row_count": len(table.rows),
+                    "row_provenance": table.row_provenance[:max_rows_per_table],
+                    "formula_count": len(table.formulas),
+                    "formulas": table.formulas,
+                    "metadata": table.metadata,
+                }
+                for table in self.tables
+            ],
+            "cells_by_sheet": {
+                sheet_name: {
+                    "cell_count": len(cells),
+                    "cells": [asdict(cell) for cell in cells[:max_cells_per_sheet]],
+                }
+                for sheet_name, cells in self.cells_by_sheet.items()
+            },
+            "workbook_dna": {
+                sheet_name: sheet_dna.to_dict()
+                for sheet_name, sheet_dna in self.workbook_dna.items()
+            },
+        }
+
+
 # ──────────────────────────────────────────────────────────────
 # Main parser
 # ──────────────────────────────────────────────────────────────
 
 class ExcelParser:
     """Excel parser — LlamaParse primary, spatial fallback."""
+
+    def __init__(self) -> None:
+        self.last_stage1_result: WorkbookExtractionResult | None = None
 
     def extract_structure(self, file_path: str) -> DocumentStructure:
         """Main entry point. Tries LlamaParse first, falls back to spatial parser.
@@ -468,12 +723,23 @@ class ExcelParser:
             source_profile={"mode": "excel_spatial", "parser": "openpyxl"},
         )
 
-    def parse(self, file_path: str) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]]]:
-        """Legacy interface — extracts DataFrames from table regions only.
+    def parse(self, file_path: str) -> tuple[dict[str, pd.DataFrame], dict[str, list[str]], dict[str, SheetDNA]]:
+        """Parse Excel file into DataFrames + formulas + CellDNA metadata.
 
-        Returns same signature as before for backward compatibility with
-        app.py's _index_excel() and excel_enricher.
+        Returns:
+            dataframes: {sheet_name: DataFrame}
+            formulas:   {sheet_name: [formula_strings]}
+            dna:        {sheet_name: SheetDNA} — the hidden truth from openpyxl
         """
+        path = Path(file_path)
+
+        if path.suffix.lower() == ".xlsx":
+            stage1 = self.extract_stage1(file_path)
+            self.last_stage1_result = stage1
+            dataframes, formulas, dna = stage1.to_parse_outputs()
+            if dataframes:
+                return dataframes, formulas, dna
+
         structure = self.extract_structure(file_path)
         dataframes = {}
         formulas = {}
@@ -504,9 +770,693 @@ class ExcelParser:
 
         # If no tables found, fall back to reading as flat DataFrame
         if not dataframes:
-            return self._fallback_parse(file_path)
+            dfs, fms = self._fallback_parse(file_path)
+            dna = self._extract_dna_safe(file_path) if dfs else {}
+            return dfs, fms, dna
 
-        return dataframes, formulas
+        # Clean HTML entities (e.g. &nbsp;) from all string columns
+        for name, df in dataframes.items():
+            for col in df.select_dtypes(include=["object"]).columns:
+                df[col] = df[col].apply(
+                    lambda v: re.sub(r"&nbsp;", " ", str(v)).strip()
+                    if isinstance(v, str) else v
+                )
+            dataframes[name] = df
+
+        # Extract CellDNA for all sheets
+        dna = self._extract_dna_safe(file_path)
+
+        return dataframes, formulas, dna
+
+    def extract_stage1(self, file_path: str) -> WorkbookExtractionResult:
+        """Run the openpyxl-first Stage 1 extraction for modern Excel files."""
+        path = Path(file_path)
+        if path.suffix.lower() != ".xlsx":
+            return self._fallback_stage1(file_path)
+
+        wb_values = openpyxl.load_workbook(file_path, data_only=True)
+        wb_formulas = None
+        try:
+            wb_formulas = openpyxl.load_workbook(file_path, data_only=False)
+        except Exception:
+            wb_formulas = None
+
+        workbook_dna = self._extract_dna_safe(file_path)
+        hidden_sheets = [
+            ws.title for ws in wb_values.worksheets
+            if ws.sheet_state != "visible"
+        ]
+        result = WorkbookExtractionResult(
+            file_path=file_path,
+            workbook_name=path.name,
+            sheet_order=[ws.title for ws in wb_values.worksheets],
+            hidden_sheets=hidden_sheets,
+            named_ranges=self._extract_named_ranges(wb_values),
+            workbook_dna=workbook_dna,
+        )
+
+        try:
+            for sheet_index, ws in enumerate(wb_values.worksheets, start=1):
+                ws_formula = wb_formulas[ws.title] if wb_formulas and ws.title in wb_formulas.sheetnames else None
+                merge_map = self._build_merge_map(ws)
+                cell_lookup = self._extract_sheet_cells(ws, ws_formula, merge_map)
+                self._enrich_sheet_cell_context(ws, cell_lookup, merge_map)
+                cells = list(cell_lookup.values())
+                result.cells_by_sheet[ws.title] = cells
+                result.sheet_metadata[ws.title] = {
+                    "sheet_index": sheet_index,
+                    "sheet_state": ws.sheet_state,
+                    "used_range": self._sheet_used_range(ws),
+                    "merged_ranges": [str(rng) for rng in ws.merged_cells.ranges],
+                    "frozen_panes": str(ws.freeze_panes) if ws.freeze_panes else None,
+                    "hidden_rows": [
+                        idx for idx, dim in ws.row_dimensions.items() if dim.hidden
+                    ],
+                    "hidden_cols": [
+                        key for key, dim in ws.column_dimensions.items() if dim.hidden
+                    ],
+                }
+
+                if ws.sheet_state != "visible":
+                    continue
+
+                table_bboxes: list[BoundingBox] = []
+                for table_idx, table in enumerate(ws.tables.values(), start=1):
+                    bbox = self._bbox_from_range(table.ref)
+                    table_bboxes.append(bbox)
+                    region_id = f"{self._clean_name(ws.title)}:table:{table_idx}"
+                    region_cells = self._cells_in_bbox(cell_lookup, bbox)
+                    title = getattr(table, "displayName", None) or table.name
+                    region = ExtractionRegion(
+                        region_id=region_id,
+                        sheet_name=ws.title,
+                        region_type="table",
+                        bbox=(bbox.r1 + 1, bbox.c1 + 1, bbox.r2 + 1, bbox.c2 + 1),
+                        title=title,
+                        header_rows=[bbox.r1 + 1],
+                        section_path=[title] if title else [],
+                        cells=region_cells,
+                        metadata={"source": "excel_table", "ref": table.ref},
+                    )
+                    result.regions.append(region)
+                    extracted = self._build_extraction_table(
+                        ws, ws_formula, bbox, region_id, title, region_cells, source="excel_table"
+                    )
+                    if extracted:
+                        result.tables.append(extracted)
+
+                grid, cell_values = self._build_grid(ws)
+                if not grid:
+                    continue
+
+                islands = self._extract_islands(grid)
+                if not islands:
+                    continue
+
+                current_heading = ws.title
+                heuristic_index = 0
+                for bbox in sorted(islands, key=lambda b: (b.r1, b.c1)):
+                    if any(self._bbox_overlaps(bbox, tb) for tb in table_bboxes):
+                        continue
+                    detected_cells = self._extract_cells(cell_values, bbox)
+                    detected = self._classify_region(bbox, detected_cells, ws)
+                    heuristic_index += 1
+                    region_id = f"{self._clean_name(ws.title)}:{detected.region_type}:{heuristic_index}"
+                    region_cells = self._cells_in_bbox(cell_lookup, bbox)
+                    title = current_heading
+                    if detected.region_type == "heading":
+                        title = self._heading_text(detected)
+                        current_heading = title
+
+                    region = ExtractionRegion(
+                        region_id=region_id,
+                        sheet_name=ws.title,
+                        region_type=detected.region_type,
+                        bbox=(bbox.r1 + 1, bbox.c1 + 1, bbox.r2 + 1, bbox.c2 + 1),
+                        title=title,
+                        header_rows=[bbox.r1 + 1] if detected.region_type == "table" else [],
+                        section_path=[current_heading] if current_heading and current_heading != ws.title else [],
+                        cells=region_cells,
+                        metadata={"source": "heuristic", "density": detected.density},
+                    )
+                    result.regions.append(region)
+
+                    if detected.region_type == "table":
+                        extracted = self._build_extraction_table(
+                            ws, ws_formula, bbox, region_id, title, region_cells, source="heuristic"
+                        )
+                        if extracted:
+                            result.tables.append(extracted)
+        finally:
+            wb_values.close()
+            if wb_formulas:
+                wb_formulas.close()
+
+        return result
+
+    def _extract_dna_safe(self, file_path: str) -> dict[str, SheetDNA]:
+        """Extract WorkbookDNA, returning empty dict on failure.
+
+        CellDNA extraction is best-effort — the pipeline works without it,
+        just with less metadata for the enricher.
+        """
+        ext = Path(file_path).suffix.lower()
+        if ext in (".csv", ".xls"):
+            # CSV has no styles, .xls needs xlrd (no openpyxl support)
+            return {}
+        try:
+            with WorkbookDNA(file_path) as wdna:
+                return dict(wdna.sheets)
+        except Exception as e:
+            print(f"[ExcelParser] CellDNA extraction failed (non-fatal): {e}")
+            return {}
+
+    def _fallback_stage1(self, file_path: str) -> WorkbookExtractionResult:
+        """Best-effort Stage 1 output for non-xlsx files."""
+        dataframes, formulas = self._fallback_parse(file_path)
+        workbook_dna = self._extract_dna_safe(file_path) if dataframes else {}
+        result = WorkbookExtractionResult(
+            file_path=file_path,
+            workbook_name=Path(file_path).name,
+            sheet_order=list(dataframes.keys()),
+            hidden_sheets=[],
+            named_ranges=[],
+            workbook_dna=workbook_dna,
+        )
+        for idx, (sheet_name, df) in enumerate(dataframes.items(), start=1):
+            table_id = f"{self._clean_name(sheet_name)}:table:1"
+            result.sheet_metadata[sheet_name] = {
+                "sheet_index": idx,
+                "sheet_state": "visible",
+                "used_range": None,
+                "merged_ranges": [],
+                "frozen_panes": None,
+                "hidden_rows": [],
+                "hidden_cols": [],
+            }
+            table = ExtractionTable(
+                table_id=table_id,
+                sheet_name=sheet_name,
+                region_id=table_id,
+                title=sheet_name,
+                headers=list(df.columns),
+                header_paths=[[sheet_name, c] for c in df.columns],
+                rows=df.to_dict(orient="records"),
+                row_provenance=[
+                    {"row_index": row_idx, "source_cells": {}, "section_path": [sheet_name]}
+                    for row_idx in range(len(df))
+                ],
+                formulas=[
+                    {"cell": item.split(": ", 1)[0], "formula": item.split(": ", 1)[1], "references": []}
+                    for item in formulas.get(sheet_name, [])
+                    if ": " in item
+                ],
+                dataframe=df.copy(),
+                metadata={"source": "fallback"},
+            )
+            result.tables.append(table)
+        return result
+
+    def _extract_named_ranges(self, wb) -> list[dict[str, object]]:
+        """Return workbook-level defined names in a serializable form."""
+        named_ranges: list[dict[str, object]] = []
+        try:
+            for name, defined_name in wb.defined_names.items():
+                destinations = []
+                try:
+                    for sheet_name, coord in defined_name.destinations:
+                        destinations.append({"sheet": sheet_name, "coord": coord})
+                except Exception:
+                    pass
+                named_ranges.append(
+                    {
+                        "name": name,
+                        "value": getattr(defined_name, "value", None),
+                        "destinations": destinations,
+                    }
+                )
+        except Exception:
+            pass
+        return named_ranges
+
+    def _build_merge_map(self, ws) -> dict[str, str]:
+        """Map each coordinate in merged ranges to its parent range string."""
+        merge_map: dict[str, str] = {}
+        for merge_range in ws.merged_cells.ranges:
+            for row in ws[str(merge_range)]:
+                for cell in row:
+                    merge_map[cell.coordinate] = str(merge_range)
+        return merge_map
+
+    def _extract_sheet_cells(self, ws, ws_formula, merge_map: dict[str, str]) -> dict[tuple[int, int], ExtractionCell]:
+        """Extract all populated or semantically meaningful cells from a sheet."""
+        cells: dict[tuple[int, int], ExtractionCell] = {}
+        for row in ws.iter_rows():
+            for cell in row:
+                formula_value = ws_formula[cell.coordinate].value if ws_formula else None
+                comment = cell.comment.text if cell.comment else None
+                hyperlink = cell.hyperlink.target if cell.hyperlink else None
+                has_signal = any(
+                    [
+                        cell.value is not None and str(cell.value).strip(),
+                        isinstance(formula_value, str) and formula_value.startswith("="),
+                        comment,
+                        hyperlink,
+                        cell.has_style,
+                    ]
+                )
+                if not has_signal:
+                    continue
+
+                fill_color = None
+                try:
+                    fill_color = cell.fill.fgColor.rgb
+                except Exception:
+                    fill_color = None
+
+                extraction = ExtractionCell(
+                    sheet_name=ws.title,
+                    address=cell.coordinate,
+                    row=cell.row,
+                    col=cell.column,
+                    raw_value=cell.value,
+                    display_value="" if cell.value is None else str(cell.value),
+                    data_type=cell.data_type,
+                    number_format=cell.number_format or "General",
+                    formula=formula_value if isinstance(formula_value, str) and formula_value.startswith("=") else None,
+                    cached_value=cell.value,
+                    comment=comment,
+                    hyperlink=hyperlink,
+                    bold=bool(cell.font and cell.font.bold),
+                    italic=bool(cell.font and cell.font.italic),
+                    fill_color=fill_color,
+                    indent=int(getattr(cell.alignment, "indent", 0) or 0),
+                    horizontal_alignment=getattr(cell.alignment, "horizontal", None),
+                    is_merged=cell.coordinate in merge_map,
+                    merged_range=merge_map.get(cell.coordinate),
+                    hidden_row=bool(ws.row_dimensions[cell.row].hidden),
+                    hidden_col=bool(ws.column_dimensions[get_column_letter(cell.column)].hidden),
+                    inferred_role=self._infer_cell_role(cell.value, formula_value, cell.number_format),
+                    formula_references=self._extract_formula_references(formula_value),
+                )
+                cells[(cell.row - 1, cell.column - 1)] = extraction
+        return cells
+
+    def _build_extraction_table(
+        self,
+        ws,
+        ws_formula,
+        bbox: BoundingBox,
+        region_id: str,
+        title: str | None,
+        region_cells: list[ExtractionCell],
+        source: str,
+    ) -> ExtractionTable | None:
+        """Convert a detected table region into the Stage 1 normalized table model."""
+        data = []
+        for r in range(bbox.r1, bbox.r2 + 1):
+            row_data = []
+            for c in range(bbox.c1, bbox.c2 + 1):
+                row_data.append(ws.cell(row=r + 1, column=c + 1).value)
+            data.append(row_data)
+
+        if not data:
+            return None
+
+        raw_df = pd.DataFrame(data)
+        if raw_df.empty:
+            return None
+
+        header_row = 0
+        for idx in range(min(3, len(raw_df))):
+            row = raw_df.iloc[idx]
+            str_count = sum(1 for value in row if isinstance(value, str) and value and value.strip())
+            if str_count >= len(row) * 0.5:
+                header_row = idx
+                break
+
+        raw_headers = raw_df.iloc[header_row].tolist()
+        clean_headers = []
+        seen_headers: dict[str, int] = {}
+        for col_idx, header in enumerate(raw_headers):
+            clean = re.sub(r"[^a-z0-9]+", "_", str(header).strip().lower()).strip("_") or f"col_{col_idx}"
+            count = seen_headers.get(clean, 0)
+            seen_headers[clean] = count + 1
+            if count:
+                clean = f"{clean}_{count}"
+            clean_headers.append(clean)
+
+        body_df = raw_df.iloc[header_row + 1:].reset_index(drop=True)
+        keep_rows = body_df.notna().any(axis=1)
+        keep_cols = []
+        keep_headers = []
+        keep_col_positions = []
+        for idx, header in enumerate(clean_headers):
+            series = body_df.iloc[:, idx] if idx < len(body_df.columns) else pd.Series(dtype=object)
+            if series.notna().any() and not re.match(r"^(nan|none)(_\d+)?$", header):
+                keep_cols.append(idx)
+                keep_headers.append(header)
+                keep_col_positions.append(idx)
+
+        if not keep_cols:
+            return None
+
+        kept_row_positions = [idx for idx, flag in enumerate(keep_rows.tolist()) if flag]
+        df = body_df.loc[keep_rows, keep_cols].copy()
+        if df.empty:
+            return None
+
+        df.columns = keep_headers
+        df = df.reset_index(drop=True)
+
+        for col in df.columns:
+            try:
+                if df[col].dtype == "object":
+                    df[col] = pd.to_numeric(df[col])
+            except (ValueError, TypeError):
+                pass
+
+        row_provenance = []
+        formula_entries = []
+        for output_row_index, body_row_index in enumerate(kept_row_positions):
+            excel_row = bbox.r1 + header_row + 2 + body_row_index
+            source_cells = {}
+            for header_name, rel_col_idx in zip(keep_headers, keep_col_positions):
+                excel_col = bbox.c1 + rel_col_idx + 1
+                coordinate = f"{get_column_letter(excel_col)}{excel_row}"
+                source_cells[header_name] = coordinate
+                if ws_formula:
+                    formula_cell = ws_formula[coordinate]
+                    if isinstance(formula_cell.value, str) and formula_cell.value.startswith("="):
+                        formula_entries.append(
+                            {
+                                "cell": coordinate,
+                                "column": header_name,
+                                "row_index": output_row_index,
+                                "formula": formula_cell.value,
+                                "references": self._extract_formula_references(formula_cell.value),
+                            }
+                        )
+            row_provenance.append(
+                {
+                    "row_index": output_row_index,
+                    "excel_row": excel_row,
+                    "source_cells": source_cells,
+                    "section_path": [title] if title else [ws.title],
+                }
+            )
+
+        return ExtractionTable(
+            table_id=region_id,
+            sheet_name=ws.title,
+            region_id=region_id,
+            title=title,
+            headers=keep_headers,
+            header_paths=[[title or ws.title, header] for header in keep_headers],
+            rows=df.to_dict(orient="records"),
+            row_provenance=row_provenance,
+            formulas=formula_entries,
+            dataframe=df,
+            metadata={
+                "source": source,
+                "bbox": (bbox.r1 + 1, bbox.c1 + 1, bbox.r2 + 1, bbox.c2 + 1),
+                "header_row": bbox.r1 + header_row + 1,
+                "cell_count": len(region_cells),
+            },
+        )
+
+    def _enrich_sheet_cell_context(
+        self,
+        ws,
+        cell_lookup: dict[tuple[int, int], ExtractionCell],
+        merge_map: dict[str, str],
+    ) -> None:
+        """Attach row/column/section meaning to extracted cells."""
+        unit_context = self._detect_unit_context(ws, merge_map)
+        section_rows = self._detect_section_rows(ws, merge_map)
+
+        for (row_idx, col_idx), cell in cell_lookup.items():
+            if cell.hidden_row or cell.hidden_col:
+                continue
+
+            row_label, row_label_coord = self._resolve_row_label(ws, row_idx + 1, col_idx + 1, merge_map)
+            column_header_path, header_coords = self._resolve_column_header_path(
+                ws, row_idx + 1, col_idx + 1, merge_map
+            )
+            section_path = self._resolve_section_path(
+                ws, row_idx + 1, col_idx + 1, merge_map, section_rows
+            )
+
+            cell.row_label = row_label
+            cell.column_header_path = column_header_path
+            cell.section_path = section_path
+            cell.unit_context = unit_context
+            cell.provenance = {
+                "row_header_cell": row_label_coord,
+                "column_header_cells": header_coords,
+                "section_header_cells": [
+                    item["coord"] for item in section_rows
+                    if item["value"] in section_path
+                ],
+            }
+            cell.semantic_text = self._build_semantic_text(cell)
+
+    def _cells_in_bbox(
+        self,
+        cell_lookup: dict[tuple[int, int], ExtractionCell],
+        bbox: BoundingBox,
+    ) -> list[ExtractionCell]:
+        """Return extracted cells within a bounding box."""
+        return [
+            cell
+            for (row, col), cell in cell_lookup.items()
+            if bbox.r1 <= row <= bbox.r2 and bbox.c1 <= col <= bbox.c2
+        ]
+
+    def _bbox_from_range(self, ref: str) -> BoundingBox:
+        """Convert an Excel range like A1:D10 into a 0-based bounding box."""
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+        return BoundingBox(
+            r1=min_row - 1,
+            c1=min_col - 1,
+            r2=max_row - 1,
+            c2=max_col - 1,
+        )
+
+    def _bbox_overlaps(self, left: BoundingBox, right: BoundingBox) -> bool:
+        """Return True when two bounding boxes overlap."""
+        return not (
+            left.r2 < right.r1
+            or right.r2 < left.r1
+            or left.c2 < right.c1
+            or right.c2 < left.c1
+        )
+
+    def _sheet_used_range(self, ws) -> str | None:
+        """Return the used range in A1 notation."""
+        if not ws.max_row or not ws.max_column:
+            return None
+        return f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+
+    def _infer_cell_role(
+        self,
+        value: object,
+        formula_value: object,
+        number_format: str | None,
+    ) -> str | None:
+        """Lightweight structural role inference for Stage 1 cells."""
+        text = str(value).strip().lower() if value is not None else ""
+        fmt = (number_format or "").lower()
+        if isinstance(formula_value, str) and formula_value.startswith("="):
+            if any(keyword in text for keyword in ("total", "subtotal", "net")):
+                return "total"
+            return "computed"
+        if any(token in fmt for token in ("yy", "dd", "mm", "h:", "m/")):
+            return "temporal"
+        if "%" in fmt:
+            return "percentage"
+        if any(symbol in fmt for symbol in ("$", "€", "£", "¥", "₹")):
+            return "currency"
+        if isinstance(value, str) and text.endswith(":"):
+            return "key_value_label"
+        if isinstance(value, str):
+            return "label"
+        if isinstance(value, (int, float)):
+            return "metric"
+        return None
+
+    def _extract_formula_references(self, formula_value: object) -> list[str]:
+        """Return direct cell/range references from a formula string."""
+        if not isinstance(formula_value, str) or not formula_value.startswith("="):
+            return []
+        refs = re.findall(
+            r"(?:'[^']+'!|[A-Za-z0-9_]+!)?\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?",
+            formula_value,
+        )
+        seen = set()
+        ordered = []
+        for ref in refs:
+            if ref not in seen:
+                seen.add(ref)
+                ordered.append(ref)
+        return ordered
+
+    def _effective_cell_value(self, ws, row: int, col: int, merge_map: dict[str, str]) -> object:
+        """Return the visible value for a coordinate, resolving merged parents."""
+        coordinate = f"{get_column_letter(col)}{row}"
+        cell = ws.cell(row=row, column=col)
+        value = cell.value
+        if value not in (None, ""):
+            return value
+
+        merged_range = merge_map.get(coordinate)
+        if not merged_range:
+            return value
+
+        min_col, min_row, _, _ = range_boundaries(merged_range)
+        return ws.cell(row=min_row, column=min_col).value
+
+    def _effective_cell_coordinate(self, row: int, col: int, merge_map: dict[str, str]) -> str:
+        """Return the anchor coordinate for merged cells, else the direct coordinate."""
+        coordinate = f"{get_column_letter(col)}{row}"
+        merged_range = merge_map.get(coordinate)
+        if not merged_range:
+            return coordinate
+        min_col, min_row, _, _ = range_boundaries(merged_range)
+        return f"{get_column_letter(min_col)}{min_row}"
+
+    def _cell_has_numeric_right(self, ws, row: int, col: int, max_cols: int, merge_map: dict[str, str]) -> bool:
+        """Heuristic: whether a row has numeric cells to the right of a label."""
+        for candidate_col in range(col + 1, min(max_cols, col + 8) + 1):
+            value = self._effective_cell_value(ws, row, candidate_col, merge_map)
+            if isinstance(value, (int, float)):
+                return True
+        return False
+
+    def _resolve_row_label(
+        self,
+        ws,
+        row: int,
+        col: int,
+        merge_map: dict[str, str],
+    ) -> tuple[str | None, str | None]:
+        """Find the most likely row label to the left of a cell."""
+        best_value = None
+        best_coord = None
+        for candidate_col in range(col - 1, 0, -1):
+            value = self._effective_cell_value(ws, row, candidate_col, merge_map)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                if text.startswith("(") and text.endswith(")"):
+                    continue
+                best_value = text
+                best_coord = self._effective_cell_coordinate(row, candidate_col, merge_map)
+                break
+        return best_value, best_coord
+
+    def _resolve_column_header_path(
+        self,
+        ws,
+        row: int,
+        col: int,
+        merge_map: dict[str, str],
+    ) -> tuple[list[str], list[str]]:
+        """Collect top-down header values above the cell's column."""
+        values: list[str] = []
+        coords: list[str] = []
+        seen: set[str] = set()
+        for candidate_row in range(1, row):
+            value = self._effective_cell_value(ws, candidate_row, col, merge_map)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            text = " ".join(value.strip().split())
+            if len(text) > 120:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            values.append(text)
+            coords.append(self._effective_cell_coordinate(candidate_row, col, merge_map))
+        return values, coords
+
+    def _detect_section_rows(
+        self,
+        ws,
+        merge_map: dict[str, str],
+    ) -> list[dict[str, object]]:
+        """Detect section headers such as Operations / Financing / Investing."""
+        sections: list[dict[str, object]] = []
+        max_cols = min(ws.max_column or 0, 8)
+        for row in range(1, (ws.max_row or 0) + 1):
+            text_candidates: list[tuple[int, str, str]] = []
+            numeric_count = 0
+            for col in range(1, max_cols + 1):
+                value = self._effective_cell_value(ws, row, col, merge_map)
+                if isinstance(value, str) and value.strip():
+                    coord = self._effective_cell_coordinate(row, col, merge_map)
+                    if any(item[2] == coord for item in text_candidates):
+                        continue
+                    text_candidates.append((col, value.strip(), coord))
+                elif isinstance(value, (int, float)):
+                    numeric_count += 1
+
+            if numeric_count > 0 or len(text_candidates) != 1:
+                continue
+
+            col, text, coord = text_candidates[0]
+            cell = ws[coord]
+            if (
+                len(text) <= 60
+                and self._cell_has_numeric_right(ws, row + 1, col, ws.max_column or col, merge_map)
+                and (bool(cell.font and cell.font.bold) or text.istitle())
+            ):
+                sections.append({"row": row, "value": text, "coord": coord})
+        return sections
+
+    def _resolve_section_path(
+        self,
+        ws,
+        row: int,
+        col: int,
+        merge_map: dict[str, str],
+        section_rows: list[dict[str, object]],
+    ) -> list[str]:
+        """Return the nearest structural section above the current row."""
+        matches = [item for item in section_rows if item["row"] < row]
+        if not matches:
+            return []
+        return [matches[-1]["value"]]
+
+    def _detect_unit_context(self, ws, merge_map: dict[str, str]) -> str | None:
+        """Find top-of-sheet unit text such as '(In millions)'."""
+        max_rows = min(ws.max_row or 0, 8)
+        max_cols = min(ws.max_column or 0, 6)
+        for row in range(1, max_rows + 1):
+            for col in range(1, max_cols + 1):
+                value = self._effective_cell_value(ws, row, col, merge_map)
+                if isinstance(value, str):
+                    text = value.strip()
+                    if text.startswith("(") and text.endswith(")"):
+                        return text
+        return None
+
+    def _build_semantic_text(self, cell: ExtractionCell) -> str | None:
+        """Build a human-readable meaning string for the extracted cell."""
+        parts = []
+        if cell.sheet_name:
+            parts.append(f"Sheet: {cell.sheet_name}")
+        if cell.section_path:
+            parts.append(f"Section: {' > '.join(cell.section_path)}")
+        if cell.row_label:
+            parts.append(f"Line item: {cell.row_label}")
+        if cell.column_header_path:
+            parts.append(f"Column path: {' > '.join(cell.column_header_path)}")
+        if cell.unit_context:
+            parts.append(f"Units: {cell.unit_context}")
+        if cell.display_value:
+            parts.append(f"Value: {cell.display_value}")
+        return " | ".join(parts) if parts else None
 
     # ══════════════════════════════════════════════════════════
     # PHASE 1: Spatial Boundary Detection
@@ -1399,3 +2349,96 @@ class ExcelParser:
     def _clean_name(name: str) -> str:
         cleaned = re.sub(r"[^a-z0-9]+", "_", str(name).strip().lower()).strip("_")
         return cleaned or "sheet"
+
+
+def _build_cli_parser() -> argparse.ArgumentParser:
+    """Return the command-line parser for inspecting Excel Stage 1 output."""
+    parser = argparse.ArgumentParser(
+        description="Inspect Stage 1 openpyxl extraction output for an Excel file.",
+    )
+    parser.add_argument("file_path", help="Path to .xlsx/.xls/.csv file")
+    parser.add_argument(
+        "--format",
+        choices=("json", "summary"),
+        default="summary",
+        help="Output format",
+    )
+    parser.add_argument(
+        "--max-cells",
+        type=int,
+        default=50,
+        help="Maximum cells to include per sheet/region in JSON output",
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=20,
+        help="Maximum table rows to include in JSON output",
+    )
+    return parser
+
+
+def _format_stage1_summary(stage1: WorkbookExtractionResult) -> str:
+    """Render a concise human-readable summary of the Stage 1 extraction."""
+    lines = [
+        f"Workbook: {stage1.workbook_name}",
+        f"Sheets: {', '.join(stage1.sheet_order) if stage1.sheet_order else '(none)'}",
+    ]
+    if stage1.hidden_sheets:
+        lines.append(f"Hidden sheets: {', '.join(stage1.hidden_sheets)}")
+    if stage1.named_ranges:
+        lines.append(f"Named ranges: {len(stage1.named_ranges)}")
+
+    for sheet_name in stage1.sheet_order:
+        meta = stage1.sheet_metadata.get(sheet_name, {})
+        lines.append("")
+        lines.append(f"[Sheet] {sheet_name}")
+        lines.append(f"  State: {meta.get('sheet_state', 'unknown')}")
+        lines.append(f"  Used range: {meta.get('used_range') or '(unknown)'}")
+        lines.append(f"  Cell records: {len(stage1.cells_by_sheet.get(sheet_name, []))}")
+
+        sheet_tables = [t for t in stage1.tables if t.sheet_name == sheet_name]
+        lines.append(f"  Tables: {len(sheet_tables)}")
+        for table in sheet_tables:
+            lines.append(
+                f"    - {table.table_id}: {len(table.rows)} rows, headers={table.headers}"
+            )
+            if table.formulas:
+                sample_formula = table.formulas[0]
+                lines.append(
+                    f"      sample formula: {sample_formula.get('cell')} = {sample_formula.get('formula')}"
+                )
+
+        regions = [r for r in stage1.regions if r.sheet_name == sheet_name]
+        if regions:
+            region_counts: dict[str, int] = {}
+            for region in regions:
+                region_counts[region.region_type] = region_counts.get(region.region_type, 0) + 1
+            counts = ", ".join(f"{kind}={count}" for kind, count in sorted(region_counts.items()))
+            lines.append(f"  Regions: {counts}")
+
+    return "\n".join(lines)
+
+
+def main() -> int:
+    """CLI entry point for inspecting Stage 1 extraction output."""
+    parser = _build_cli_parser()
+    args = parser.parse_args()
+
+    excel_parser = ExcelParser()
+    stage1 = excel_parser.extract_stage1(args.file_path)
+
+    if args.format == "json":
+        payload = stage1.to_dict(
+            max_cells_per_sheet=max(1, args.max_cells),
+            max_rows_per_table=max(1, args.max_rows),
+        )
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(_format_stage1_summary(stage1))
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

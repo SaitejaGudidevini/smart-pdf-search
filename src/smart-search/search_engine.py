@@ -58,7 +58,7 @@ class SearchResult:
 
 
 class SearchEngine:
-    VECTOR_SIZE = 384  # all-MiniLM-L6-v2
+    VECTOR_SIZE = 768  # BAAI/bge-base-en-v1.5
 
     def __init__(self):
         self.store = PostgresVectorStore()
@@ -68,8 +68,8 @@ class SearchEngine:
 
     def _load_model(self):
         if self.model is None:
-            print("Loading embedding model (all-MiniLM-L6-v2)...")
-            self.model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+            print("Loading embedding model (bge-base-en-v1.5, 768d)...")
+            self.model = TextEmbedding("BAAI/bge-base-en-v1.5")
             print("Embedding model loaded.")
         if self.reranker is None and _RERANKER_AVAILABLE:
             try:
@@ -105,7 +105,14 @@ class SearchEngine:
 
         embeddings = {}
         if child_texts:
-            for index, embedding in zip(child_indexes, self.model.embed(child_texts)):
+            # Batch embeddings to avoid OOM on large documents
+            BATCH_SIZE = 32
+            all_embeddings = []
+            for i in range(0, len(child_texts), BATCH_SIZE):
+                batch = child_texts[i:i + BATCH_SIZE]
+                batch_embs = list(self.model.embed(batch))
+                all_embeddings.extend(batch_embs)
+            for index, embedding in zip(child_indexes, all_embeddings):
                 embeddings[index] = embedding.tolist()
 
         self.store.replace_document(document_key, chunks, embeddings)
@@ -132,8 +139,13 @@ class SearchEngine:
         child_count = len(chunks) - parent_count
         print(f"Indexed {len(chunks)} chunks ({parent_count} parents, {child_count} children) for {document_key}")
 
-    def search(self, query: str, top_k: int = 5, document_id: int | None = None) -> list[SearchResult]:
-        """Hybrid search: pgvector similarity + PostgreSQL FTS + RRF fusion."""
+    def search(self, query: str, top_k: int = 5, document_id: int | None = None, document_keys: list[str] | None = None) -> list[SearchResult]:
+        """Hybrid search: pgvector similarity + PostgreSQL FTS + RRF fusion.
+
+        Args:
+            document_keys: Optional list of document keys to scope search to
+                          (used for cabinet-scoped search).
+        """
         self._load_model()
         topic = self.extract_topic(query)
         query_emb = list(self.model.embed([topic]))[0].tolist()
@@ -141,8 +153,8 @@ class SearchEngine:
         if document_id is not None:
             document_key = make_document_key(str(document_id), document_id)
 
-        vector_hits = self.store.vector_search(query_emb, limit=50, document_key=document_key)
-        keyword_hits = self.store.keyword_search(topic, limit=50, document_key=document_key)
+        vector_hits = self.store.vector_search(query_emb, limit=50, document_key=document_key, document_keys=document_keys)
+        keyword_hits = self.store.keyword_search(topic, limit=50, document_key=document_key, document_keys=document_keys)
 
         vector_results = [(row["chunk_id"], float(row["score"])) for row in vector_hits]
         keyword_results = [(row["chunk_id"], float(row["score"])) for row in keyword_hits]

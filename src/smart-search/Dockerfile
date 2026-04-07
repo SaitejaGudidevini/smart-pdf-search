@@ -16,4 +16,6 @@ RUN mkdir -p uploads cache
 
 EXPOSE 8080
 
+ENV PORT=8080
+
 CMD ["python", "app.py"]

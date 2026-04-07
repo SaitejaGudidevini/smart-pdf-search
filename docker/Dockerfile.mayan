@@ -1,0 +1,4 @@
+FROM mayanedms/mayanedms:latest
+
+# Copy the RAG Chat plugin into Mayan's Python path
+COPY ../src/mayan_rag_chat /opt/mayan-edms/lib/python3.13/site-packages/mayan_rag_chat

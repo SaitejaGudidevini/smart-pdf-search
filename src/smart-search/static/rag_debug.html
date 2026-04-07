@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Pipeline Debug — EDMS</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+
+  .header { background: #1e293b; border-bottom: 1px solid #334155; padding: 14px 24px; display: flex; align-items: center; gap: 12px; }
+  .header h1 { font-size: 18px; color: #f1f5f9; }
+  .header .badge { background: #8b5cf6; color: white; font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600; }
+
+  .main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+
+  .search-bar { display: flex; gap: 8px; margin-bottom: 24px; }
+  .search-bar input { flex: 1; background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 14px 18px; border-radius: 10px; font-size: 15px; outline: none; }
+  .search-bar input:focus { border-color: #8b5cf6; }
+  .search-bar button { background: #8b5cf6; color: white; border: none; padding: 14px 28px; border-radius: 10px; font-size: 15px; cursor: pointer; font-weight: 600; }
+  .search-bar button:hover { background: #7c3aed; }
+  .search-bar button:disabled { background: #334155; cursor: not-allowed; }
+
+  .stages { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 1000px) { .stages { grid-template-columns: 1fr; } }
+
+  .stage { background: #1e293b; border: 1px solid #334155; border-radius: 12px; overflow: hidden; }
+  .stage.active { border-color: #8b5cf6; box-shadow: 0 0 20px rgba(139,92,246,0.15); }
+  .stage.done { border-color: #059669; }
+
+  .stage-header { padding: 14px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #334155; }
+  .stage-num { width: 28px; height: 28px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; flex-shrink: 0; }
+  .stage-num.s1 { background: #7c3aed22; color: #a78bfa; border: 1px solid #7c3aed44; }
+  .stage-num.s2 { background: #05966922; color: #6ee7b7; border: 1px solid #05966944; }
+  .stage-num.s3 { background: #0284c722; color: #67e8f9; border: 1px solid #0284c744; }
+  .stage-title { font-size: 14px; font-weight: 600; }
+  .stage-subtitle { font-size: 11px; color: #64748b; margin-left: auto; }
+
+  .stage-body { padding: 14px 16px; font-size: 13px; max-height: 600px; overflow-y: auto; }
+
+  .doc-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; }
+  .doc-row.winner { background: #059669/15; border: 1px solid #05966944; }
+  .doc-row.other { background: #1e293b; border: 1px solid #334155; }
+  .doc-rank { font-size: 11px; color: #64748b; width: 24px; }
+  .doc-name { flex: 1; font-weight: 500; }
+  .doc-score { font-family: 'SF Mono', Monaco, monospace; font-size: 12px; color: #a78bfa; }
+  .doc-path { font-size: 11px; color: #64748b; margin-top: 2px; }
+  .doc-winner-badge { background: #059669; color: white; font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
+
+  .chunk { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+  .chunk-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .chunk-score { font-family: monospace; font-size: 12px; color: #10b981; }
+  .chunk-section { font-size: 11px; color: #f59e0b; background: #f59e0b15; padding: 1px 6px; border-radius: 3px; }
+  .chunk-page { font-size: 11px; color: #64748b; }
+  .chunk-text { font-size: 12px; color: #94a3b8; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+
+  .answer-box { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 14px; }
+  .answer-text { font-size: 14px; line-height: 1.7; color: #e2e8f0; }
+  .answer-model { font-size: 11px; color: #64748b; margin-top: 8px; }
+
+  .loading { text-align: center; padding: 40px; color: #64748b; }
+  .loading::after { content: ''; animation: dots 1.5s infinite; }
+  @keyframes dots { 0% { content: '.'; } 33% { content: '..'; } 66% { content: '...'; } }
+
+  .empty { text-align: center; padding: 40px; color: #475569; }
+  .sql-badge { display: inline-block; background: #059669; color: white; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+  .semantic-badge { display: inline-block; background: #7c3aed; color: white; font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }
+
+  .scoped-info { background: #7c3aed15; border: 1px solid #7c3aed33; border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 12px; color: #a78bfa; }
+  .timing { font-size: 11px; color: #64748b; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>RAG Pipeline Debug</h1>
+  <span class="badge">Two-Stage Search</span>
+</div>
+
+<div class="main">
+  <div class="search-bar">
+    <input type="text" id="queryInput" placeholder="Ask a question — watch the pipeline find the right document..."
+           onkeydown="if(event.key==='Enter')runSearch()" autofocus>
+    <button id="searchBtn" onclick="runSearch()">Search</button>
+  </div>
+
+  <div class="stages">
+    <!-- Stage 1 -->
+    <div class="stage" id="stage1">
+      <div class="stage-header">
+        <div class="stage-num s1">1</div>
+        <span class="stage-title">Metadata Routing</span>
+        <span class="stage-subtitle" id="s1-status">waiting</span>
+      </div>
+      <div class="stage-body" id="s1-body">
+        <div class="empty">Query goes to rag.document_routes<br>keyword + vector + RRF</div>
+      </div>
+    </div>
+
+    <!-- Stage 2 -->
+    <div class="stage" id="stage2">
+      <div class="stage-header">
+        <div class="stage-num s2">2</div>
+        <span class="stage-title">Scoped Chunk Search</span>
+        <span class="stage-subtitle" id="s2-status">waiting</span>
+      </div>
+      <div class="stage-body" id="s2-body">
+        <div class="empty">Searches only inside the winning document</div>
+      </div>
+    </div>
+
+    <!-- Stage 3 -->
+    <div class="stage" id="stage3">
+      <div class="stage-header">
+        <div class="stage-num s3">3</div>
+        <span class="stage-title">Answer</span>
+        <span class="stage-subtitle" id="s3-status">waiting</span>
+      </div>
+      <div class="stage-body" id="s3-body">
+        <div class="empty">LLM synthesizes answer from retrieved chunks</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function runSearch() {
+  const input = document.getElementById('queryInput');
+  const btn = document.getElementById('searchBtn');
+  const query = input.value.trim();
+  if (!query) return;
+
+  btn.disabled = true;
+
+  // Reset stages
+  setStage('stage1', 'active', '<div class="loading">Searching document routes</div>');
+  setStage('stage2', '', '<div class="empty">waiting for Stage 1</div>');
+  setStage('stage3', '', '<div class="empty">waiting for Stage 2</div>');
+  document.getElementById('s1-status').textContent = 'searching...';
+  document.getElementById('s2-status').textContent = 'waiting';
+  document.getElementById('s3-status').textContent = 'waiting';
+
+  const startTime = Date.now();
+
+  try {
+    const resp = await fetch('/api/search', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query }),
+    });
+    const data = await resp.json();
+    const totalTime = Date.now() - startTime;
+
+    // ── STAGE 1: Routing results ──
+    const routing = data.routing || {};
+    const matchedDocs = routing.matched_docs || [];
+    const scopedTo = routing.scoped_to || [];
+
+    let s1Html = '';
+    if (matchedDocs.length > 0) {
+      s1Html += '<div style="font-size:11px;color:#64748b;margin-bottom:8px;">Query matched against document_routes (keyword + vector + RRF):</div>';
+      matchedDocs.forEach((doc, i) => {
+        const isWinner = i === 0;
+        s1Html += `<div class="doc-row ${isWinner ? 'winner' : 'other'}">
+          <span class="doc-rank">#${i + 1}</span>
+          <div style="flex:1">
+            <div class="doc-name">${isWinner ? '<span class="doc-winner-badge">WINNER</span> ' : ''}${doc.document}</div>
+            <div class="doc-path">${doc.path || 'no cabinet path'}</div>
+            <div class="doc-path">path_ids: ${JSON.stringify(doc.path_ids || [])}</div>
+          </div>
+          <span class="doc-score">${doc.score.toFixed(6)}</span>
+        </div>`;
+      });
+      if (scopedTo && scopedTo.length > 0) {
+        s1Html += `<div class="scoped-info">Stage 2 scoped to: ${scopedTo.join(', ')}</div>`;
+      }
+    } else {
+      s1Html = '<div class="empty">No routes matched — fell back to unscoped search</div>';
+    }
+    setStage('stage1', 'done', s1Html);
+    document.getElementById('s1-status').textContent = `${matchedDocs.length} docs found`;
+
+    // ── STAGE 2: Chunk results ──
+    const results = data.results || [];
+    const sqlTrace = data.sql_trace || null;
+    let s2Html = '';
+
+    if (sqlTrace) {
+      s2Html += `<div class="scoped-info"><span class="sql-badge">SQL</span> Routed to SQL Agent</div>`;
+      s2Html += `<div class="chunk"><div class="chunk-header"><span class="chunk-section">SQL Query</span></div>`;
+      s2Html += `<div class="chunk-text">${sqlTrace.sql || 'N/A'}</div></div>`;
+      if (sqlTrace.results && sqlTrace.results.length > 0) {
+        s2Html += `<div class="chunk"><div class="chunk-header"><span class="chunk-section">Results</span></div>`;
+        s2Html += `<div class="chunk-text">${JSON.stringify(sqlTrace.results, null, 2)}</div></div>`;
+      }
+    } else if (results.length > 0) {
+      s2Html += `<div style="font-size:11px;color:#64748b;margin-bottom:8px;"><span class="semantic-badge">Semantic</span> Top chunks from scoped pgvector search:</div>`;
+      results.forEach(r => {
+        (r.chunks || []).forEach(c => {
+          s2Html += `<div class="chunk">
+            <div class="chunk-header">
+              <span class="chunk-score">${c.score}</span>
+              <span class="chunk-page">page ${r.page_number}</span>
+              <span class="chunk-section">${r.label || ''}</span>
+            </div>
+            <div class="chunk-text">${(c.text || '').substring(0, 300)}</div>
+          </div>`;
+        });
+      });
+    } else {
+      s2Html = '<div class="empty">No chunks found</div>';
+    }
+    setStage('stage2', 'done', s2Html);
+    document.getElementById('s2-status').textContent = sqlTrace ? 'SQL' : `${results.length} results`;
+
+    // ── STAGE 3: Answer ──
+    const ai = data.ai_summary || {};
+    let s3Html = '';
+    if (ai && ai.text) {
+      s3Html += `<div class="answer-box">
+        <div class="answer-text">${ai.text}</div>
+        <div class="answer-model">Model: ${ai.model || 'unknown'}</div>
+      </div>`;
+    } else if (sqlTrace) {
+      const sqlAnswer = data.ai_summary?.text || 'See SQL results in Stage 2';
+      s3Html += `<div class="answer-box"><div class="answer-text">${sqlAnswer}</div></div>`;
+    } else {
+      s3Html = '<div class="empty">No answer generated</div>';
+    }
+    s3Html += `<div class="timing">Total time: ${totalTime}ms</div>`;
+    setStage('stage3', 'done', s3Html);
+    document.getElementById('s3-status').textContent = `${totalTime}ms`;
+
+  } catch (e) {
+    setStage('stage1', '', `<div class="empty">Error: ${e.message}</div>`);
+  }
+
+  btn.disabled = false;
+}
+
+function setStage(id, cls, html) {
+  const el = document.getElementById(id);
+  el.className = 'stage ' + cls;
+  el.querySelector('.stage-body').innerHTML = html;
+}
+</script>
+</body>
+</html>

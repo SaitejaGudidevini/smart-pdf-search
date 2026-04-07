@@ -63,6 +63,13 @@
   .step-subtitle { font-size: 11px; color: #64748b; margin-left: auto; }
   .step-body { padding: 0 12px 10px 44px; font-size: 11px; color: #94a3b8; font-family: 'SF Mono', Monaco, monospace; white-space: pre-wrap; max-height: 200px; overflow-y: auto; display: none; }
   .step.active .step-body, .step.done .step-body { display: block; }
+  .inspection-grid { display: grid; gap: 8px; }
+  .inspection-stat { display: grid; grid-template-columns: 110px 1fr; gap: 8px; }
+  .inspection-stat .label { color: #64748b; }
+  .preview-list { display: flex; flex-direction: column; gap: 6px; }
+  .preview-item { padding: 8px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; }
+  .preview-item .title { color: #e2e8f0; font-weight: 600; margin-bottom: 4px; }
+  .preview-item .meta { color: #94a3b8; font-size: 11px; }
 
   /* Upload area */
   .upload-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
@@ -93,7 +100,7 @@
   <span class="badge">EDMS Pipeline</span>
   <div class="doc-select">
     <span style="color:#64748b;font-size:12px;">Document:</span>
-    <select id="docSelect">
+    <select id="docSelect" onchange="handleDocumentChange(this.value)">
       <option value="">-- Upload or select --</option>
     </select>
     <button onclick="document.getElementById('fileInput').click()" style="background:#1e293b;border:1px solid #334155;color:#e2e8f0;padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px;">Upload Excel</button>
@@ -135,6 +142,7 @@
 const API = '';
 let currentDocKey = '';
 let currentDocName = '';
+let inspectionCache = {};
 
 // ── Upload ──
 async function uploadFile(input) {
@@ -144,10 +152,10 @@ async function uploadFile(input) {
   addMessage('user', `Uploading: ${file.name}`);
   setEngineSteps([
     { id: 'upload', title: 'Uploading file', status: 'active', body: file.name },
-    { id: 'parse', title: 'Stage 1: Gemini Extraction', status: 'pending', body: '' },
-    { id: 'enrich', title: 'Stage 2: Schema + Enrichment', status: 'pending', body: '' },
-    { id: 'chunk', title: 'Chunking + Embedding', status: 'pending', body: '' },
-    { id: 'store', title: 'Stage 3: SQLite + pgvector', status: 'pending', body: '' },
+    { id: 'parse', title: 'Stage 1: Parse (openpyxl)', status: 'pending', body: '' },
+    { id: 'classify', title: 'Stage 1.5: Column Classification', status: 'pending', body: '' },
+    { id: 'enrich', title: 'Stage 2: Semantic Rows + Schema', status: 'pending', body: '' },
+    { id: 'store', title: 'Stage 3: Embed + Store', status: 'pending', body: '' },
   ]);
 
   const form = new FormData();
@@ -155,7 +163,7 @@ async function uploadFile(input) {
 
   try {
     updateStep('upload', 'done', `Uploaded ${file.name}`);
-    updateStep('parse', 'active', 'Sending to Gemini...');
+    updateStep('parse', 'active', 'Parsing with openpyxl...');
 
     const resp = await fetch(`${API}/api/upload`, { method: 'POST', body: form });
     const data = await resp.json();
@@ -164,10 +172,11 @@ async function uploadFile(input) {
       currentDocKey = data.document_key || file.name.replace(/\./g, '_');
       currentDocName = file.name;
 
-      updateStep('parse', 'done', `Parsed: ${Object.keys(data.sheets || {}).length || '?'} sheets`);
-      updateStep('enrich', 'done', `Schema generated, ${data.total_chunks || '?'} chunks`);
-      updateStep('chunk', 'done', `${data.total_chunks || '?'} chunks embedded`);
-      updateStep('store', 'done', data.sql_queryable ? 'SQLite + pgvector ready' : 'pgvector ready');
+      const sheets = Object.keys(data.sheets || {});
+      updateStep('parse', 'done', `Parsed: ${sheets.length} sheets (${data.total_rows || 0} rows)`);
+      updateStep('classify', 'done', data.classification ? `Classified ${sheets.length} sheet(s)` : 'Heuristic fallback');
+      updateStep('enrich', 'done', `${data.total_semantic_rows || 0} semantic rows, ${data.parent_chunks || sheets.length} parent chunks`);
+      updateStep('store', 'done', data.sql_queryable ? `${data.child_chunks || 0} chunks embedded + SQLite ready` : `${data.child_chunks || 0} chunks embedded`);
 
       // Add to dropdown
       const opt = document.createElement('option');
@@ -177,10 +186,14 @@ async function uploadFile(input) {
       document.getElementById('docSelect').appendChild(opt);
 
       addMessage('bot', `Indexed <b>${file.name}</b><br>` +
-        `Sheets: ${JSON.stringify(Object.keys(data.sheets || {}))}<br>` +
-        `Chunks: ${data.total_chunks}<br>` +
+        `Sheets: ${sheets.join(', ')}<br>` +
+        `Rows: ${data.total_rows || 0} → ${data.total_semantic_rows || 0} semantic chunks<br>` +
+        `Parent chunks: ${data.parent_chunks || 0} (sheet summaries)<br>` +
+        `Child chunks: ${data.child_chunks || 0} (row-level, embedded)<br>` +
         `SQL Queryable: ${data.sql_queryable ? 'Yes' : 'No'}<br><br>` +
         `Ask me anything about this data!`, 'semantic');
+
+      await loadInspection(currentDocKey);
     } else {
       addMessage('bot', `Indexed <b>${file.name}</b> as ${data.doc_type}. ${data.total_chunks} chunks.`);
     }
@@ -262,6 +275,124 @@ async function sendMessage() {
   }
 
   document.getElementById('sendBtn').disabled = false;
+}
+
+async function handleDocumentChange(documentKey) {
+  currentDocKey = documentKey || currentDocKey;
+  if (!currentDocKey) return;
+  await loadInspection(currentDocKey);
+}
+
+async function loadInspection(documentKey) {
+  if (!documentKey) return;
+
+  if (inspectionCache[documentKey]) {
+    renderInspection(inspectionCache[documentKey]);
+    return;
+  }
+
+  setEngineSteps([
+    { id: 'inspect', title: 'Inspection Load', status: 'active', body: `Loading Stage 1 and Stage 2 artifacts for ${documentKey}...` },
+  ]);
+
+  try {
+    const resp = await fetch(`${API}/api/excel/inspect/${encodeURIComponent(documentKey)}`);
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Failed to load inspection payload');
+    inspectionCache[documentKey] = data;
+    renderInspection(data);
+  } catch (e) {
+    setEngineSteps([
+      { id: 'inspect', title: 'Inspection Load', status: 'error', body: e.message },
+    ]);
+  }
+}
+
+function renderInspection(payload) {
+  const stage1 = payload.stage1 || {};
+  const stage2 = payload.stage2 || {};
+  const classification = payload.classification || {};
+
+  const sheetNames = stage1.sheet_order || [];
+  const tables = stage1.tables || [];
+  const cellsBySheet = stage1.cells_by_sheet || {};
+  const stage1Stats = [
+    `Workbook: ${stage1.workbook_name || currentDocName || 'Unknown'}`,
+    `Sheets: ${sheetNames.length}`,
+    `Tables: ${tables.length}`,
+    `Named ranges: ${(stage1.named_ranges || []).length}`,
+  ].join('\n');
+
+  const sheetPreview = sheetNames.slice(0, 5).map(name => {
+    const sheet = cellsBySheet[name] || {};
+    const cellCount = (sheet.cells || []).length;
+    const usedRange = (stage1.sheet_metadata || {})[name]?.used_range || 'unknown';
+    return `${name}: ${cellCount} cells sampled, used range ${usedRange}`;
+  }).join('\n');
+
+  const semanticRows = stage2.semantic_rows || [];
+  const semanticPreview = semanticRows.slice(0, 3).map((row, idx) => {
+    const text = row.text || '';
+    return `#${idx + 1}\n${text}`;
+  }).join('\n\n');
+
+  const classPreview = Object.entries(classification).slice(0, 3).map(([sheet, meta]) => {
+    const type = meta?.data_type || 'unknown';
+    const summary = meta?.summary || meta?.sheet_summary || '';
+    return `${sheet}: ${type}${summary ? `\n${summary}` : ''}`;
+  }).join('\n\n');
+
+  setEngineSteps([
+    {
+      id: 'stage1',
+      title: 'Stage 1: Workbook Structure',
+      status: 'done',
+      body: `${stage1Stats}\n\nSheets\n${sheetPreview || 'No sheet preview available.'}`,
+    },
+    {
+      id: 'stage1cells',
+      title: 'Stage 1: Sample Provenance',
+      status: 'done',
+      body: buildStage1CellPreview(cellsBySheet),
+    },
+    {
+      id: 'stage2',
+      title: 'Stage 2: Semantic Rows',
+      status: 'done',
+      body: `Total semantic rows: ${stage2.total_semantic_rows || semanticRows.length}\n\n${semanticPreview || 'No semantic rows cached.'}`,
+    },
+    {
+      id: 'classify',
+      title: 'Classification',
+      status: 'done',
+      body: classPreview || 'No classification summary cached.',
+    },
+    {
+      id: 'schema',
+      title: 'Schema',
+      status: 'done',
+      body: payload.schema || 'No schema cached.',
+    },
+  ]);
+}
+
+function buildStage1CellPreview(cellsBySheet) {
+  const lines = [];
+  Object.entries(cellsBySheet).slice(0, 2).forEach(([sheetName, payload]) => {
+    const cells = (payload && payload.cells) || [];
+    lines.push(`[${sheetName}]`);
+    cells
+      .filter(cell => cell.semantic_text)
+      .slice(0, 3)
+      .forEach(cell => {
+        lines.push(`${cell.address}: ${cell.semantic_text}`);
+      });
+    if (lines[lines.length - 1] === `[${sheetName}]`) {
+      lines.push('No semantic cell preview available.');
+    }
+    lines.push('');
+  });
+  return lines.join('\n').trim() || 'No Stage 1 cells cached.';
 }
 
 function buildTable(rows) {

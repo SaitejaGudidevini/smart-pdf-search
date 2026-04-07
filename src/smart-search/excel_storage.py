@@ -60,6 +60,16 @@ _SEMANTIC_SIGNAL_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+_PROVENANCE_SIGNAL_WORDS = re.compile(
+    r"\b("
+    r"where did|came from|come from|source of|source for|origin of|"
+    r"what does this number|what is this value|which cell|which row|which section|"
+    r"which year|which period|line item|belongs to|represented by|"
+    r"what does .* represent|trace|provenance"
+    r")\b",
+    re.IGNORECASE,
+)
+
 # Statements that mutate data -- must be rejected
 _MUTATION_PATTERN = re.compile(
     r"^\s*(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|REPLACE|ATTACH|DETACH|PRAGMA|VACUUM)\b",
@@ -137,6 +147,7 @@ class ExcelStorageManager:
         document_key: str,
         document_name: str,
         dataframes: dict[str, pd.DataFrame],
+        semantic_rows: list[dict[str, Any]] | None = None,
     ) -> str:
         """Create a SQLite database for an Excel file and register it.
 
@@ -183,6 +194,12 @@ class ExcelStorageManager:
 
                 # Build schema metadata for this table
                 schema_info[sql_table] = _build_table_schema(clean_df, sql_table)
+
+            if semantic_rows:
+                facts_df = _build_facts_dataframe(semantic_rows)
+                if not facts_df.empty:
+                    facts_df.to_sql("excel_facts", conn, if_exists="replace", index=False)
+                    schema_info["excel_facts"] = _build_table_schema(facts_df, "excel_facts")
 
             conn.commit()
         finally:
@@ -290,8 +307,16 @@ class ExcelStorageManager:
             lines.append(f"  Rows: {table_info.get('row_count', '?')}")
             for col in table_info.get("columns", []):
                 col_line = f"  - {col['name']} ({col['dtype']})"
-                if col.get("sample_values"):
+                # Show ALL values for text columns with low cardinality
+                # so the LLM can write exact WHERE clauses
+                unique_count = col.get("unique_count", 0)
+                is_text = col["dtype"] in ("object", "str")
+                if is_text and unique_count <= 30 and col.get("sample_values"):
+                    col_line += f" -- ALL values: {col['sample_values']}"
+                elif col.get("sample_values"):
                     col_line += f" -- e.g.: {col['sample_values']}"
+                if col.get("min") is not None:
+                    col_line += f" -- range: [{col['min']}, {col['max']}]"
                 lines.append(col_line)
             lines.append("")
 
@@ -343,6 +368,109 @@ class ExcelStorageManager:
         finally:
             conn.close()
 
+    def search_facts(
+        self,
+        document_key: str,
+        query: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Search provenance-aware semantic facts stored for a document."""
+        entry = self.get_registry_entry(document_key)
+        if entry is None:
+            return []
+
+        db_path = Path(entry["db_path"])
+        if not db_path.exists():
+            return []
+
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='excel_facts'"
+            ).fetchone()
+            if not exists:
+                return []
+
+            rows = [dict(r) for r in conn.execute("SELECT * FROM excel_facts").fetchall()]
+        finally:
+            conn.close()
+
+        scored = []
+        for row in rows:
+            score = _score_fact_row(query, row)
+            if score > 0:
+                row["_score"] = score
+                scored.append(row)
+
+        scored.sort(key=lambda item: (item["_score"], len(item.get("fact_text", ""))), reverse=True)
+        return scored[:limit]
+
+    def answer_provenance(
+        self,
+        document_key: str,
+        query: str,
+        limit: int = 3,
+    ) -> dict[str, Any]:
+        """Return a grounded answer for provenance-style questions."""
+        matches = self.search_facts(document_key, query, limit=limit)
+        if not matches:
+            return {
+                "question": query,
+                "answer": "I couldn't find a grounded provenance match for that value in this workbook.",
+                "results": [],
+            }
+
+        best = matches[0]
+        source_cells = _load_json_field(best.get("source_cells_json"))
+        source_labels = _load_json_field(best.get("source_labels_json"))
+        column_paths = _load_json_field(best.get("column_paths_json"))
+        section_path = _load_json_field(best.get("section_path_json"))
+        row_semantic_texts = _load_json_field(best.get("row_semantic_texts_json"))
+        display_sheet = (
+            best.get("original_sheet_name")
+            or _extract_original_sheet_name(row_semantic_texts)
+            or best.get("sheet_name")
+        )
+        unique_labels = []
+        if isinstance(source_labels, dict):
+            unique_labels = list(dict.fromkeys(v for v in source_labels.values() if v))
+        referenced_value = None
+        value_match = re.search(r"\b\d+(?:\.\d+)?\b", query)
+        if value_match:
+            referenced_value = value_match.group(0)
+
+        lead = "This value"
+        if referenced_value:
+            lead = f"The value {referenced_value}"
+
+        sentence = [lead]
+        if display_sheet:
+            sentence.append(f"comes from the '{display_sheet}' sheet")
+        if section_path:
+            sentence.append(f"in the {' > '.join(section_path)} section")
+        if unique_labels:
+            sentence.append(f"for the line item '{unique_labels[0]}'")
+        if column_paths:
+            sentence.append(f"under {' / '.join(column_paths)}")
+        sentence_text = " ".join(sentence) + "."
+
+        details = []
+        if best.get("units"):
+            details.append(f"Units: {best['units']}.")
+        formatted_cells = _format_source_cells(source_cells, source_labels)
+        if formatted_cells:
+            details.append(f"Source cells: {formatted_cells}.")
+        if best.get("fact_text"):
+            details.append(f"Grounded fact: {best['fact_text']}")
+
+        return {
+            "question": query,
+            "answer": " ".join([sentence_text] + details),
+            "results": matches,
+            "semantic_rows": row_semantic_texts,
+        }
+
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
@@ -364,15 +492,69 @@ class ExcelStorageManager:
 
     def list_databases(self) -> list[dict[str, Any]]:
         """List all registered Excel databases."""
-        with self._pg_connect() as conn:
-            return conn.execute(
-                f"""
-                SELECT document_key, document_name, db_path, sheet_names,
-                       total_rows, created_at
-                FROM {self._pg_schema}.excel_databases
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
+        if self._pg_available:
+            with self._pg_connect() as conn:
+                return conn.execute(
+                    f"""
+                    SELECT document_key, document_name, db_path, sheet_names,
+                           total_rows, created_at
+                    FROM {self._pg_schema}.excel_databases
+                    ORDER BY created_at DESC
+                    """
+                ).fetchall()
+        # Fallback to local registry
+        return list(self._local_registry.values())
+
+    def build_catalog(self) -> str:
+        """Build a compact catalog of ALL SQL databases for LLM routing.
+
+        Returns a text summary like:
+            DB 1: "Financial Statements.xlsx" (key=mayan:10)
+              Tables: income_statement (13 rows: Revenue, Cost of revenue, R&D, ...)
+                      balance_sheet (16 rows: Cash, Investments, Assets, ...)
+            DB 2: "Apple.xlsx" (key=mayan:11)
+              Tables: income_statement (37 rows: Products, Services, Total net sales, ...)
+        """
+        all_keys = []
+        if self._pg_available:
+            try:
+                dbs = self.list_databases()
+                all_keys = [(d["document_key"], d["document_name"]) for d in dbs]
+            except Exception:
+                pass
+        for key, entry in self._local_registry.items():
+            if key not in [k for k, _ in all_keys]:
+                all_keys.append((key, entry.get("document_name", key)))
+
+        if not all_keys:
+            return ""
+
+        lines = []
+        for i, (doc_key, doc_name) in enumerate(all_keys, 1):
+            entry = self.get_registry_entry(doc_key)
+            if not entry:
+                continue
+
+            schema = entry["schema_json"]
+            if isinstance(schema, str):
+                schema = json.loads(schema)
+
+            lines.append(f'DB {i}: "{doc_name}" (key={doc_key})')
+            for table_name, table_info in schema.items():
+                row_count = table_info.get("row_count", "?")
+                cols = table_info.get("columns", [])
+                col_names = [c["name"] for c in cols]
+                # Show sample values from text columns for context
+                sample_vals = []
+                for c in cols:
+                    if c["dtype"] in ("object", "str") and c.get("sample_values"):
+                        sample_vals.extend(str(v) for v in c["sample_values"][:4])
+                sample_str = ", ".join(sample_vals[:6]) if sample_vals else ""
+                lines.append(f"  - {table_name} ({row_count} rows, cols: {col_names})")
+                if sample_str:
+                    lines.append(f"    Sample values: {sample_str}")
+
+        return "\n".join(lines)
 
 
 # ======================================================================
@@ -392,6 +574,9 @@ def classify_query(query: str) -> str:
         return "semantic"
 
     text = query.strip()
+
+    if _PROVENANCE_SIGNAL_WORDS.search(text):
+        return "provenance"
 
     # Count signal matches
     sql_matches = len(_SQL_SIGNAL_WORDS.findall(text))
@@ -451,6 +636,101 @@ def _sanitize_table_name(name: str) -> str:
     return clean
 
 
+def _build_facts_dataframe(semantic_rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """Normalize Stage 2 semantic rows into a facts table."""
+    records: list[dict[str, Any]] = []
+    for row in semantic_rows:
+        metadata = row.get("metadata", {}) or {}
+        records.append(
+            {
+                "sheet_name": row.get("sheet_name"),
+                "original_sheet_name": metadata.get("original_sheet_name"),
+                "row_index": row.get("row_index"),
+                "section": metadata.get("section"),
+                "section_path_json": json.dumps(metadata.get("section_path", [])),
+                "column_paths_json": json.dumps(metadata.get("column_paths", [])),
+                "units": metadata.get("units"),
+                "source_cells_json": json.dumps(metadata.get("source_cells", {})),
+                "source_labels_json": json.dumps(metadata.get("source_labels", {})),
+                "row_semantic_texts_json": json.dumps(metadata.get("row_semantic_texts", [])),
+                "fact_text": row.get("text", ""),
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _load_json_field(value: Any) -> Any:
+    """Load a JSON-encoded sqlite field when possible."""
+    if value in (None, ""):
+        return [] if value == "[]" else {}
+    if isinstance(value, (list, dict)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return value
+
+
+def _extract_original_sheet_name(row_semantic_texts: Any) -> str | None:
+    """Pull the original sheet name out of Stage 1 semantic text if available."""
+    if not isinstance(row_semantic_texts, list) or not row_semantic_texts:
+        return None
+    first = str(row_semantic_texts[0])
+    match = re.search(r"Sheet:\s*([^|]+)", first)
+    if not match:
+        return None
+    return match.group(1).strip()
+
+
+def _format_source_cells(source_cells: Any, source_labels: Any) -> str:
+    """Render source cells using human labels when available."""
+    if not isinstance(source_cells, dict) or not source_cells:
+        return ""
+
+    parts = []
+    for raw_label, address in source_cells.items():
+        label = raw_label
+        if isinstance(source_labels, dict):
+            label = source_labels.get(raw_label) or raw_label
+        parts.append(f"{label} ({address})")
+    return ", ".join(parts)
+
+
+def _score_fact_row(query: str, row: dict[str, Any]) -> int:
+    """Simple lexical scorer for provenance facts."""
+    query_lower = query.lower()
+    terms = [term for term in re.findall(r"[a-z0-9]+", query_lower) if len(term) > 1]
+    score = 0
+
+    fact_text = str(row.get("fact_text", "")).lower()
+    if not fact_text:
+        return 0
+
+    for term in terms:
+        if term in fact_text:
+            score += 3
+
+    for number in re.findall(r"\b\d+(?:\.\d+)?\b", query_lower):
+        if number in fact_text:
+            score += 8
+
+    if _PROVENANCE_SIGNAL_WORDS.search(query_lower):
+        score += 2
+
+    labels = _load_json_field(row.get("source_labels_json"))
+    if isinstance(labels, dict):
+        for label in labels.values():
+            label_text = str(label).lower()
+            if label_text and label_text in query_lower:
+                score += 10
+
+    section = str(row.get("section", "")).lower()
+    if section and section in query_lower:
+        score += 5
+
+    return score
+
+
 def _sanitize_column_name(name: str) -> str:
     """Convert a column name to a valid SQL identifier."""
     if not isinstance(name, str):
@@ -472,10 +752,13 @@ def _build_table_schema(df: pd.DataFrame, table_name: str) -> dict[str, Any]:
         non_null = int(df[col].notna().sum())
         unique_vals = df[col].dropna().unique()
 
-        # Sample values for LLM context (up to 5)
-        sample = unique_vals[:5].tolist()
-        # Convert numpy/pandas types to native Python
-        sample = [_to_native(v) for v in sample]
+        # For text columns with low cardinality, store ALL values
+        # so the LLM can write exact WHERE clauses
+        is_text = dtype in ("object", "str")
+        if is_text and len(unique_vals) <= 30:
+            sample = [_to_native(v) for v in unique_vals.tolist()]
+        else:
+            sample = [_to_native(v) for v in unique_vals[:5].tolist()]
 
         col_info: dict[str, Any] = {
             "name": col,

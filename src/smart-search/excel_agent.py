@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Dangerous SQL keywords (anything that mutates state)
 # ---------------------------------------------------------------------------
-_UNSAFE_KEYWORDS: set[str] = {
+# DML/DDL statements that must be blocked (mutate data or schema)
+_UNSAFE_STATEMENTS: set[str] = {
     "INSERT",
     "UPDATE",
     "DELETE",
@@ -28,19 +29,33 @@ _UNSAFE_KEYWORDS: set[str] = {
     "ALTER",
     "CREATE",
     "TRUNCATE",
-    "REPLACE",
     "MERGE",
     "GRANT",
     "REVOKE",
-    "EXEC",
-    "EXECUTE",
     "ATTACH",
     "DETACH",
 }
 
-# Pre-compiled pattern: match any unsafe keyword as a whole word (case-insensitive)
+# Keywords that are unsafe as STATEMENTS but safe as FUNCTIONS:
+#   REPLACE(x, y, z) = safe string function
+#   REPLACE INTO ... = unsafe DML
+#   EXEC/EXECUTE = unsafe as standalone, but okay inside function names
+# We match these only when NOT followed by '(' (i.e., not a function call)
+_UNSAFE_WHEN_NOT_FUNCTION: set[str] = {
+    "REPLACE",
+    "EXEC",
+    "EXECUTE",
+}
+
+# Pattern for always-unsafe keywords (word boundary match)
 _UNSAFE_PATTERN = re.compile(
-    r"\b(" + "|".join(_UNSAFE_KEYWORDS) + r")\b",
+    r"\b(" + "|".join(_UNSAFE_STATEMENTS) + r")\b",
+    re.IGNORECASE,
+)
+
+# Pattern for keywords that are only unsafe when NOT used as functions
+_UNSAFE_NON_FUNC_PATTERN = re.compile(
+    r"\b(" + "|".join(_UNSAFE_WHEN_NOT_FUNCTION) + r")\b(?!\s*\()",
     re.IGNORECASE,
 )
 
@@ -53,10 +68,18 @@ You are a data analyst. Answer questions by writing SQLite-compatible SELECT que
 DATABASE SCHEMA:
 {schema_description}
 
+Column role annotations help you write better queries:
+- [role: metric] columns are numeric measures — use SUM, AVG, MIN, MAX on these
+- [role: categorical] columns are dimensions — use these in GROUP BY and WHERE filters
+- [role: temporal] columns represent time — use these for date filtering and ordering
+- [role: identifier] columns uniquely identify rows — use these in WHERE for lookups
+- [role: computed] columns are derived values — avoid aggregating these unless asked
+
 Rules:
 - Write SELECT queries only
 - Use exact column names from the schema (wrap column names containing spaces in double quotes)
 - For date filtering, use formats shown in the schema
+- Prefer GROUP BY on dimension columns when aggregating metrics
 - Return ONLY the SQL query, no explanation
 - Do NOT wrap the SQL in markdown code fences
 """
@@ -74,6 +97,12 @@ Cite specific numbers and values from the data.
 If the results are empty, say the data does not contain matching records.
 """
 
+_ROUTE_SYSTEM_PROMPT = """\
+You are a database router. Given a user question and a catalog of available databases, \
+pick the ONE database most likely to contain the answer.
+
+Return ONLY the database key (e.g., "mayan:10"). No explanation."""
+
 
 class ExcelSQLAgent:
     """Generate SQL from natural language, execute it, and synthesise answers.
@@ -89,6 +118,42 @@ class ExcelSQLAgent:
     def __init__(self, max_retries: int = 3, timeout: int = 30) -> None:
         self.max_retries = max_retries
         self.timeout = timeout
+
+    # ------------------------------------------------------------------
+    # Database routing (pick the right DB from multiple)
+    # ------------------------------------------------------------------
+
+    def route_to_database(self, question: str, catalog: str, doc_keys: list[str]) -> str | None:
+        """Given a question and a catalog of databases, pick the best one.
+
+        Uses a single lightweight LLM call to select from available databases.
+        Falls back to the first key if LLM is unavailable.
+
+        Returns the document_key of the best-matching database.
+        """
+        if not doc_keys:
+            return None
+        if len(doc_keys) == 1:
+            return doc_keys[0]
+
+        user_prompt = (
+            f"Question: {question}\n\n"
+            f"Available databases:\n{catalog}\n\n"
+            f"Which database key should I query? Return ONLY the key."
+        )
+
+        raw = self._call_llm(_ROUTE_SYSTEM_PROMPT, user_prompt)
+        if raw:
+            picked = raw.strip().strip('"').strip("'")
+            # Find the closest match from available keys
+            for key in doc_keys:
+                if key in picked:
+                    logger.info("Router picked %s for question: %s", key, question[:80])
+                    return key
+
+        # Fallback: first key
+        logger.info("Router fallback to %s", doc_keys[0])
+        return doc_keys[0]
 
     # ------------------------------------------------------------------
     # Public API
@@ -116,13 +181,16 @@ class ExcelSQLAgent:
         if not re.match(r"^\s*(SELECT|WITH)\b", stripped, re.IGNORECASE):
             return False
 
-        # Reject any unsafe keyword
-        if _UNSAFE_PATTERN.search(stripped):
+        # Reject unsafe keywords (check outside string literals)
+        sql_without_strings = re.sub(r"'[^']*'", "''", stripped)
+        if _UNSAFE_PATTERN.search(sql_without_strings):
+            return False
+        # Reject REPLACE/EXEC only when used as statements, not functions
+        if _UNSAFE_NON_FUNC_PATTERN.search(sql_without_strings):
             return False
 
-        # Block multiple statements (semicolons inside the body)
-        # Allow semicolons only at the very end (already stripped above)
-        if ";" in stripped:
+        # Block multiple statements (semicolons outside string literals)
+        if ";" in sql_without_strings:
             return False
 
         return True

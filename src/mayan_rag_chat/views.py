@@ -165,12 +165,17 @@ class SearchAPIView(View):
             return JsonResponse({"error": "Query required"}, status=400)
 
         try:
+            search_body = {
+                "query": query,
+                "document_id": body.get("document_id"),
+            }
+            # Pass cabinet_id for scoped search
+            if body.get("cabinet_id"):
+                search_body["cabinet_id"] = body["cabinet_id"]
+
             resp = httpx.post(
                 f'{RAG_URL}/api/search',
-                json={
-                    "query": query,
-                    "document_id": body.get("document_id"),
-                },
+                json=search_body,
                 timeout=60,
             )
             data = resp.json()

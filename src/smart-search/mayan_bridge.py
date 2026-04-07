@@ -45,6 +45,124 @@ class MayanBridge:
     def _auth_headers(self) -> dict:
         return {"Authorization": f"Token {self._token}"}
 
+    async def get_document_cabinet_path(self, doc_id: int) -> dict | None:
+        """Get the full cabinet hierarchy for a document.
+
+        Returns a landmark dict that travels with every chunk:
+        {
+            "cabinet_id": 8,
+            "cabinet_label": "Q2 2025 Financial Filings",
+            "cabinet_path": "Apple Inc. / Q2 2025 Financial Filings",
+            "company_id": 3,
+            "company_name": "Apple Inc.",
+            "hierarchy": [
+                {"id": 3, "label": "Apple Inc.", "level": 0},
+                {"id": 8, "label": "Q2 2025 Financial Filings", "level": 1},
+            ]
+        }
+        """
+        token = await self._get_token()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/documents/{doc_id}/cabinets/?format=json",
+                headers=self._auth_headers(),
+            )
+            if resp.status_code != 200:
+                return None
+
+            cabs = resp.json().get("results", [])
+            if not cabs:
+                return None
+
+            # Use the first cabinet (document's primary location)
+            cab = cabs[0]
+            full_path = cab.get("full_path", cab.get("label", ""))
+            path_parts = [p.strip() for p in full_path.split("/") if p.strip()]
+
+            # Walk up the hierarchy to build landmark
+            hierarchy = []
+            current_id = cab["id"]
+            current_label = cab.get("label", "")
+            parent_id = cab.get("parent_id")
+
+            # Build from leaf to root
+            chain = [{"id": current_id, "label": current_label}]
+            while parent_id:
+                parent_resp = await client.get(
+                    f"{self.base_url}/cabinets/{parent_id}/?format=json",
+                    headers=self._auth_headers(),
+                )
+                if parent_resp.status_code != 200:
+                    break
+                parent = parent_resp.json()
+                chain.append({"id": parent["id"], "label": parent["label"]})
+                parent_id = parent.get("parent_id")
+
+            # Reverse: root first
+            chain.reverse()
+            for i, node in enumerate(chain):
+                node["level"] = i
+            hierarchy = chain
+
+            return {
+                "cabinet_id": cab["id"],
+                "cabinet_label": cab.get("label", ""),
+                "cabinet_path": full_path,
+                "company_id": hierarchy[0]["id"] if hierarchy else None,
+                "company_name": hierarchy[0]["label"] if hierarchy else None,
+                "hierarchy": hierarchy,
+            }
+
+    async def get_cabinet_document_ids(self, cabinet_id: int) -> list[int]:
+        """Get all document IDs in a cabinet and its sub-cabinets (recursive).
+
+        If cabinet_id is a company-level cabinet, returns docs from all
+        contract sub-cabinets under it.
+        """
+        token = await self._get_token()
+        doc_ids = set()
+
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get documents directly in this cabinet
+            resp = await client.get(
+                f"{self.base_url}/cabinets/{cabinet_id}/documents/?format=json&page_size=100",
+                headers=self._auth_headers(),
+            )
+            if resp.status_code == 200:
+                for doc in resp.json().get("results", []):
+                    doc_ids.add(doc["id"])
+
+            # Get child cabinets and recurse
+            resp = await client.get(
+                f"{self.base_url}/cabinets/{cabinet_id}/?format=json",
+                headers=self._auth_headers(),
+            )
+            if resp.status_code == 200:
+                children = resp.json().get("children", [])
+                for child in children:
+                    child_id = child["id"] if isinstance(child, dict) else child
+                    # Get docs from child cabinet
+                    child_resp = await client.get(
+                        f"{self.base_url}/cabinets/{child_id}/documents/?format=json&page_size=100",
+                        headers=self._auth_headers(),
+                    )
+                    if child_resp.status_code == 200:
+                        for doc in child_resp.json().get("results", []):
+                            doc_ids.add(doc["id"])
+
+        return sorted(doc_ids)
+
+    async def list_cabinets(self) -> list[dict]:
+        """List all cabinets with their hierarchy."""
+        token = await self._get_token()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{self.base_url}/cabinets/?format=json&page_size=100",
+                headers=self._auth_headers(),
+            )
+            resp.raise_for_status()
+            return resp.json().get("results", [])
+
     async def list_documents(self, page: int = 1) -> list[dict]:
         """List documents from Mayan EDMS."""
         token = await self._get_token()

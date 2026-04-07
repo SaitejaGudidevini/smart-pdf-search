@@ -86,7 +86,7 @@ class PostgresVectorStore:
                     enriched_content text,
                     lines jsonb NOT NULL DEFAULT '[]'::jsonb,
                     metadata jsonb NOT NULL DEFAULT '{{}}'::jsonb,
-                    embedding vector(384),
+                    embedding vector(768),
                     content_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
                     created_at timestamptz NOT NULL DEFAULT now(),
                     updated_at timestamptz NOT NULL DEFAULT now()
@@ -145,7 +145,7 @@ class PostgresVectorStore:
                     document_name text NOT NULL DEFAULT '',
                     doc_type text NOT NULL DEFAULT '',
                     mayan_doc_id integer,
-                    embedding vector(384),
+                    embedding vector(768),
                     chunk_count integer NOT NULL DEFAULT 0,
                     updated_at timestamptz NOT NULL DEFAULT now()
                 )
@@ -235,11 +235,16 @@ class PostgresVectorStore:
                         ),
                     )
 
-    def vector_search(self, query_vector: list[float], limit: int = 50, document_key: str | None = None):
+    def vector_search(self, query_vector: list[float], limit: int = 50, document_key: str | None = None, document_keys: list[str] | None = None):
         filters = ["chunk_type = 'child'", "embedding IS NOT NULL"]
         vector_literal = _to_vector_literal(query_vector)
         params: list[Any] = [vector_literal]
-        if document_key:
+        if document_keys:
+            # Cabinet scope: filter to specific document keys inside the query
+            placeholders = ", ".join(["%s"] * len(document_keys))
+            filters.append(f"document_key IN ({placeholders})")
+            params.extend(document_keys)
+        elif document_key:
             filters.append("document_key = %s")
             params.append(document_key)
 
@@ -270,10 +275,14 @@ class PostgresVectorStore:
                 params,
             ).fetchall()
 
-    def keyword_search(self, query: str, limit: int = 50, document_key: str | None = None):
+    def keyword_search(self, query: str, limit: int = 50, document_key: str | None = None, document_keys: list[str] | None = None):
         filters = ["chunk_type = 'child'"]
         params: list[Any] = [query]
-        if document_key:
+        if document_keys:
+            placeholders = ", ".join(["%s"] * len(document_keys))
+            filters.append(f"document_key IN ({placeholders})")
+            params.extend(document_keys)
+        elif document_key:
             filters.append("document_key = %s")
             params.append(document_key)
 

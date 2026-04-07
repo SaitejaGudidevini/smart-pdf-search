@@ -43,6 +43,8 @@ services:
       POSTGRES_DB: mayan
       POSTGRES_USER: mayan
       POSTGRES_PASSWORD: mayan
+    ports:
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -85,7 +87,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 8G
     environment:
       MAYAN_API_URL: http://mayan-app:8000/api/v4
       MAYAN_PASSWORD: admin123
@@ -101,6 +103,8 @@ services:
     volumes:
       - rag-cache:/app/cache
       - rag-uploads:/app/uploads
+      - excel-dbs:/tmp/excel_dbs
+      - fastembed-cache:/tmp/fastembed_cache
     depends_on:
       mayan-app:
         condition: service_started
@@ -113,3 +117,5 @@ volumes:
   postgres-data:
   rag-cache:
   rag-uploads:
+  excel-dbs:
+  fastembed-cache:

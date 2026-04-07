@@ -18,5 +18,7 @@ llama-parse>=0.6.0  # LlamaParse for Excel parsing (Tier 1). Set LLAMA_CLOUD_API
 google-genai>=1.0.0  # Gemini for complex Excel layouts (Tier 2). Set GOOGLE_API_KEY to enable.
 celery>=5.4.0  # Background task queue for Excel indexing
 redis>=5.0.0  # Celery result backend + task arg persistence
+spacy>=3.7.0  # Keyword extraction for metadata routing
+# Run after install: python -m spacy download en_core_web_sm
 # docling  # ML-based parser (optional, 2GB+). Uncomment if needed. pymupdf4llm is primary now.
 # sentence-transformers==3.4.1  # uncomment for cross-encoder reranking

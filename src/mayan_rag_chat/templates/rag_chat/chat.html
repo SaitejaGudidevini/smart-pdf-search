@@ -80,9 +80,12 @@
                 </div>
             </div>
         </div>
-        <div class="rag-input-row">
+        <div class="rag-input-row" style="display:flex;gap:8px;align-items:center;">
+            <select id="cabinet-select" style="padding:8px 12px;border-radius:6px;border:1px solid #d1d5db;font-size:14px;min-width:180px;background:#fff;">
+                <option value="">All Documents</option>
+            </select>
             <input type="text" id="query-input" placeholder="Ask about your documents..."
-                   onkeydown="if(event.key==='Enter')sendQuery()" autofocus>
+                   onkeydown="if(event.key==='Enter')sendQuery()" autofocus style="flex:1;">
             <button id="send-btn" onclick="sendQuery()">Search</button>
         </div>
     </div>
@@ -115,6 +118,29 @@ let viewerState = { docId: null, pageNum: 0, totalPages: 30 };
 let lastQuery = '';
 let lastResults = [];
 
+// Load cabinet tree into dropdown on page load
+(async function loadCabinets() {
+    try {
+        const resp = await fetch(RAG_SIDECAR + '/api/cabinets');
+        const data = await resp.json();
+        const select = document.getElementById('cabinet-select');
+        if (!select || !data.cabinets) return;
+        data.cabinets.forEach(company => {
+            const optCompany = document.createElement('option');
+            optCompany.value = company.id;
+            optCompany.textContent = company.label;
+            optCompany.style.fontWeight = 'bold';
+            select.appendChild(optCompany);
+            (company.children || []).forEach(contract => {
+                const opt = document.createElement('option');
+                opt.value = contract.id;
+                opt.textContent = '\u00A0\u00A0\u00A0\u00A0' + contract.label;
+                select.appendChild(opt);
+            });
+        });
+    } catch(e) { console.log('Cabinet load failed:', e); }
+})();
+
 function sendQuery() {
     const input = document.getElementById('query-input');
     const query = input.value.trim();
@@ -133,10 +159,13 @@ function sendQuery() {
     input.value = '';
     btn.disabled = true;
 
+    const cabinetSelect = document.getElementById('cabinet-select');
+    const cabinetId = cabinetSelect ? cabinetSelect.value : '';
+
     fetch('/rag_chat/api/search/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
-        body: JSON.stringify({ query: query })
+        body: JSON.stringify({ query: query, cabinet_id: cabinetId || undefined })
     })
     .then(r => r.json())
     .then(data => {
