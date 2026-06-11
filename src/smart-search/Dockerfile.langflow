@@ -1,0 +1,45 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# System deps for PyMuPDF + LibreOffice
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libmupdf-dev \
+    libreoffice-core \
+    libreoffice-calc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Langflow first (it pins its own deps)
+RUN pip install --no-cache-dir langflow
+
+# Then install our pipeline deps (allow overrides)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Download spaCy model
+RUN python -m spacy download en_core_web_sm
+
+# Copy our pipeline code
+COPY . .
+
+# Copy custom Langflow components
+RUN mkdir -p /app/langflow_components
+COPY langflow_components/ /app/langflow_components/
+
+# Fix the worker script path for Docker
+RUN sed -i 's|/Users/saiteja/Documents/Dev/EDMS/src/smart-search/langflow_components/_parse_pdf_worker.py|/app/langflow_components/_parse_pdf_worker.py|g' /app/langflow_components/edms_pdf_parser.py && \
+    sed -i 's|/Users/saiteja/Documents/Dev/EDMS/src/smart-search/.venv/bin/python3|/usr/local/bin/python3|g' /app/langflow_components/edms_pdf_parser.py && \
+    sed -i 's|/Users/saiteja/Documents/Dev/EDMS/src/smart-search|/app|g' /app/langflow_components/*.py
+
+RUN mkdir -p uploads cache
+
+EXPOSE 7860
+
+ENV LANGFLOW_AUTO_LOGIN=true
+ENV LANGFLOW_SKIP_AUTH_AUTO_LOGIN=true
+ENV LANGFLOW_WORKERS=1
+ENV PYTHONPATH=/app
+ENV LANGFLOW_DATABASE_URL=sqlite:////data/langflow.db
+ENV LANGFLOW_CONFIG_DIR=/data
+
+CMD ["langflow", "run", "--host", "0.0.0.0", "--port", "7860", "--workers", "1", "--components-path", "/app/langflow_components"]

@@ -207,9 +207,11 @@ class MetadataRouter:
             """, [ts_query_str, ts_query_str] + (params_keyword[1:] if cabinet_id else [])).fetchall()
 
             # Vector search (embedding)
-            vector_params = [query_embedding]
+            # Placeholder order: %s in SELECT, %s in cab_filter (if any), %s in ORDER BY
+            vector_params: list[Any] = [query_embedding]
             if cabinet_id:
                 vector_params.append(json.dumps([cabinet_id]))
+            vector_params.append(query_embedding)
             vector_results = conn.execute(f"""
                 SELECT document_key,
                        1 - (summary_embedding <=> %s::vector) as score
@@ -218,7 +220,7 @@ class MetadataRouter:
                 {cab_filter}
                 ORDER BY summary_embedding <=> %s::vector
                 LIMIT 20
-            """, vector_params + [query_embedding] + ([json.dumps([cabinet_id])] if cabinet_id else [])).fetchall()
+            """, vector_params).fetchall()
 
             # RRF Fusion
             k = 60  # RRF constant

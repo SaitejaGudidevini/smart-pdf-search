@@ -2,9 +2,11 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install system deps for PyMuPDF
+# Install system deps for PyMuPDF + LibreOffice for .xls → .xlsx conversion
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libmupdf-dev \
+    libreoffice-core \
+    libreoffice-calc \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

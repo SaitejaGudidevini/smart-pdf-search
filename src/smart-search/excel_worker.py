@@ -95,6 +95,7 @@ def index_excel_task(
     file_path: str,
     filename: str,
     mayan_doc_id: int | None = None,
+    use_spreadsheet_llm: bool = True,
 ) -> dict:
     """Background task: parse -> enrich -> chunk -> embed -> store.
 
@@ -141,6 +142,15 @@ def index_excel_task(
 
         dataframes, formulas, cell_dna = excel_parser.parse(file_path)
         excel_enricher.set_stage1_result(excel_parser.last_stage1_result)
+
+        # Build clean DataFrames using deterministic data-type profiling
+        from excel_dataframe_builder import build_dataframes as build_clean_dfs
+        clean_dfs = build_clean_dfs(file_path)
+        if clean_dfs:
+            logger.info("Deterministic builder: %d clean tables from %s", len(clean_dfs), filename)
+            dataframes = clean_dfs
+            formulas = {k: [] for k in dataframes}
+
         debug.dump_stage1(dataframes, formulas)
 
         self.update_state(
@@ -197,6 +207,7 @@ def index_excel_task(
         chunks = excel_enricher.build_chunks(
             dataframes, formulas, filename, document_key,
             schema_description, mayan_doc_id,
+            use_spreadsheet_llm=use_spreadsheet_llm,
         )
 
         debug.dump_stage3(chunks)

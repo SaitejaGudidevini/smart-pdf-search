@@ -1055,16 +1055,24 @@ class ExcelEnricher:
         document_key: str,
         schema_description: str,
         mayan_doc_id: int | None = None,
+        use_spreadsheet_llm: bool = False,
     ) -> list:
-        """Convert semantic rows into Chunk objects for embedding.
-
-        Creates one parent chunk per sheet (summary context) and one child
-        chunk per row (role-tagged semantic text). Only child chunks get
-        embedded; parent chunks provide retrieval context.
-
-        This replaces the old path of extract_structure() → Gemini → markdown
-        → ChunkingPipeline for Excel files.
+        """Convert semantic rows or SpreadsheetLLM encoding into Chunk objects.
+        
+        If use_spreadsheet_llm=True, uses coordinate-compressed encoding (arXiv:2407.09025).
+        Otherwise, uses role-tagged semantic rows.
         """
+        if use_spreadsheet_llm:
+            from spreadsheet_llm import create_spreadsheet_llm_chunks
+            chunks = create_spreadsheet_llm_chunks(
+                dataframes, self._workbook_dna, filename, document_key
+            )
+            # Add mayan_doc_id to metadata
+            for c in chunks:
+                if mayan_doc_id:
+                    c.metadata["mayan_doc_id"] = mayan_doc_id
+            return chunks
+
         from chunking_pipeline import Chunk
 
         chunks: list[Chunk] = []

@@ -1465,6 +1465,9 @@ class ExcelParser:
     def _build_grid(self, ws) -> tuple[list[list[int]], dict]:
         """Convert worksheet to binary grid + cell value map.
 
+        Merged cell siblings are filled so the island detector treats
+        the entire merged range as occupied (prevents table fragmentation).
+
         Returns:
             grid: 2D list of 0s and 1s
             cell_values: dict mapping (row, col) → cell value
@@ -1497,12 +1500,33 @@ class ExcelParser:
                     grid[r][c] = 1
                     cell_values[(r, c)] = cell.value
 
+        # Fill merged cell siblings — prevents island fragmentation.
+        # When "Three Months Ended" spans B1:C1, only B1 has a value.
+        # Without this fix, C1 stays 0 and BFS sees a gap → 2 islands.
+        # With this fix, C1 becomes 1 and BFS sees one connected region.
+        for merged_range in ws.merged_cells.ranges:
+            min_r = merged_range.min_row - 1  # 0-indexed
+            max_r = merged_range.max_row - 1
+            min_c = merged_range.min_col - 1
+            max_c = merged_range.max_col - 1
+            # Get the anchor cell's value (top-left of the merge)
+            anchor_val = cell_values.get((min_r, min_c))
+            for r in range(min_r, max_r + 1):
+                for c in range(min_c, max_c + 1):
+                    if r < max_row and c < max_col:
+                        grid[r][c] = 1
+                        if anchor_val is not None and (r, c) not in cell_values:
+                            cell_values[(r, c)] = anchor_val
+
         return grid, cell_values
 
     def _extract_islands(self, grid: list[list[int]]) -> list[BoundingBox]:
         """Find contiguous islands of 1s using BFS flood fill.
 
         Two cells are contiguous if adjacent horizontally, vertically, or diagonally.
+        After BFS, merges islands that share significant row overlap (>60%)
+        to handle spacer columns between column groups.
+
         Returns bounding boxes for each island.
         """
         if not grid:
@@ -1520,6 +1544,61 @@ class ExcelParser:
                     bbox = self._bfs_island(grid, visited, r, c, rows, cols)
                     if bbox.area >= 1:  # at least 1 cell
                         islands.append(bbox)
+
+        # Layer 2: Merge row-aligned islands (handles spacer columns).
+        # If two islands share >60% of their row range, they're likely
+        # parts of the same table separated by empty columns.
+        islands = self._merge_row_aligned_islands(islands)
+
+        return islands
+
+    def _merge_row_aligned_islands(self, islands: list[BoundingBox]) -> list[BoundingBox]:
+        """Merge islands that share significant row overlap."""
+        if len(islands) <= 1:
+            return islands
+
+        merged = True
+        while merged:
+            merged = False
+            new_islands = []
+            used = set()
+
+            for i in range(len(islands)):
+                if i in used:
+                    continue
+                current = islands[i]
+
+                for j in range(i + 1, len(islands)):
+                    if j in used:
+                        continue
+                    other = islands[j]
+
+                    # Calculate row overlap
+                    overlap_start = max(current.r1, other.r1)
+                    overlap_end = min(current.r2, other.r2)
+                    if overlap_end < overlap_start:
+                        continue  # no row overlap
+
+                    overlap_rows = overlap_end - overlap_start + 1
+                    current_rows = current.r2 - current.r1 + 1
+                    other_rows = other.r2 - other.r1 + 1
+                    min_rows = min(current_rows, other_rows)
+
+                    # Merge if >60% row overlap relative to the smaller island
+                    if min_rows > 0 and overlap_rows / min_rows >= 0.6:
+                        current = BoundingBox(
+                            r1=min(current.r1, other.r1),
+                            c1=min(current.c1, other.c1),
+                            r2=max(current.r2, other.r2),
+                            c2=max(current.c2, other.c2),
+                        )
+                        used.add(j)
+                        merged = True
+
+                new_islands.append(current)
+                used.add(i)
+
+            islands = new_islands
 
         return islands
 

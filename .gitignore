@@ -34,3 +34,6 @@ out/
 
 # Node
 node_modules/
+
+# Secrets — never commit
+src/smart-search/jiratoken.txt

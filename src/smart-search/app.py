@@ -2,6 +2,7 @@
 
 import os
 import json
+import math
 import httpx
 from pathlib import Path
 from dotenv import load_dotenv
@@ -212,14 +213,28 @@ def _cache_excel_inspection(
 
     excel_inspection_cache[document_key] = {
         "document_key": document_key,
-        "stage1": stage1_payload,
-        "classification": classification_meta,
-        "stage2": {
+        "stage1": _sanitize_for_json(stage1_payload),
+        "classification": _sanitize_for_json(classification_meta),
+        "stage2": _sanitize_for_json({
             "total_semantic_rows": len(semantic_rows),
             "semantic_rows": semantic_rows[:500],
-        },
-        "schema": schema_description,
+        }),
+        "schema": _sanitize_for_json(schema_description),
     }
+
+
+def _sanitize_for_json(value):
+    """Replace NaN/Inf with None so FastAPI can serialize inspection payloads."""
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, tuple):
+        return [_sanitize_for_json(v) for v in value]
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+    return value
 
 
 def _stamp_cabinet_on_chunks(doc_id: int, cabinet_landmark: dict, filename: str = "") -> None:
@@ -342,15 +357,25 @@ def _index_pdf(pdf_path: str, filename: str, mayan_doc_id: int | None = None) ->
 def _index_excel(file_path: str, filename: str, mayan_doc_id: int | None = None) -> dict:
     """Index an Excel file: parse → classify → semantic rows → embed → store.
 
-    Option B pipeline: semantic rows ARE the chunks. No Gemini extraction needed.
-    Each row becomes a child chunk with role tags; each sheet gets a parent chunk
-    with summary context.
+    Tries Gemini layout detection first (clean DataFrames for SQLite),
+    falls back to spatial parser if Gemini is unavailable.
     """
     debug = PipelineDebugger(filename)
 
-    # Stage 1: Adaptive parsing (openpyxl/pandas — no API calls)
+    # Stage 1: Parse with openpyxl (spatial parser for cell_dna/formulas)
     dataframes, formulas, cell_dna = excel_parser.parse(file_path)
-    excel_enricher.set_stage1_result(excel_parser.last_stage1_result)
+    stage1_result = getattr(excel_parser, 'last_stage1_result', None)
+
+    # Build clean DataFrames using deterministic data-type profiling
+    # This replaces both Stage 1 provenance and Gemini layout detection
+    from excel_dataframe_builder import build_dataframes as build_clean_dfs
+    clean_dfs = build_clean_dfs(file_path)
+    if clean_dfs:
+        print(f"[Excel] Deterministic builder: {len(clean_dfs)} clean tables from {filename}")
+        dataframes = clean_dfs
+        formulas = {k: [] for k in dataframes}
+
+    excel_enricher.set_stage1_result(stage1_result)
     debug.dump_stage1(dataframes, formulas)
 
     # Stage 1.5a: Extract keywords from RAW DataFrames (before tagging)
@@ -1361,7 +1386,7 @@ async def excel_chat(body: dict):
                 "trace": trace,
             }
 
-        results = search_engine.search(question, top_k=5)
+        results = search_engine.search(question, top_k=5, document_keys=[document_key])
         trace["results_count"] = len(results)
 
         rag_context = []
@@ -1434,7 +1459,7 @@ async def excel_query(body: dict):
         }
     else:
         # Fall back to standard hybrid search
-        results = search_engine.search(question, top_k=5, document_id=None)
+        results = search_engine.search(question, top_k=5, document_keys=[document_key])
         return {
             "query_type": "semantic",
             "question": question,

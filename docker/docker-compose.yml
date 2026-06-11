@@ -92,6 +92,7 @@ services:
       MAYAN_API_URL: http://mayan-app:8000/api/v4
       MAYAN_PASSWORD: admin123
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       RAG_PGHOST: postgresql
       RAG_PGPORT: 5432
       RAG_PGDATABASE: mayan
@@ -112,6 +113,43 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ============================================================
+  # LANGFLOW — Visual RAG Pipeline Orchestrator
+  # ============================================================
+  langflow:
+    build:
+      context: ../src/smart-search
+      dockerfile: Dockerfile.langflow
+    container_name: langflow
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+    environment:
+      LANGFLOW_AUTO_LOGIN: "true"
+      LANGFLOW_SKIP_AUTH_AUTO_LOGIN: "true"
+      LANGFLOW_WORKERS: "1"
+      PYTHONPATH: /app
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      RAG_PGHOST: postgresql
+      RAG_PGPORT: "5432"
+      RAG_PGDATABASE: mayan
+      RAG_PGUSER: mayan
+      RAG_PGPASSWORD: mayan
+      RAG_PG_SCHEMA: rag
+    ports:
+      - "7860:7860"
+    volumes:
+      - rag-uploads:/app/uploads
+      - excel-dbs:/tmp/excel_dbs
+      - fastembed-cache:/tmp/fastembed_cache
+      - langflow-data:/data
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   mayan-media:
   postgres-data:
@@ -119,3 +157,4 @@ volumes:
   rag-uploads:
   excel-dbs:
   fastembed-cache:
+  langflow-data:
